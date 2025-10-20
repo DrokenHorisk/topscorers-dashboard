@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>TopScorers — Dashboard</title>
+  <style>
+    body{margin:0;background:#0E1116;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto}
+    .wrap{padding:12px}
+    .frame{width:100%;height:calc(100vh - 24px);border:0;border-radius:12px;background:#171A22}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <iframe id="frame" class="frame" title="dashboard"></iframe>
+  </div>
+  <script>
+    // Pour dev local: localStorage.setItem('API_BASE','http://localhost:8080')
+    const API = (localStorage.getItem('API_BASE') || '');
+    fetch(API + '/api/dashboard')
+      .then(r => r.text())
+      .then(html => {
+        const blob = new Blob([html], {type:'text/html'});
+        const url = URL.createObjectURL(blob);
+        document.getElementById('frame').src = url;
+      })
+      .catch(err => {
+        document.body.innerHTML = '<div style="padding:24px">Erreur: '+ String(err) +'</div>';
+      });
+  </script>
+</body>
+</html>

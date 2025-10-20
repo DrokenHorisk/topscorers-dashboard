@@ -1,0 +1,51 @@
+image:
+  backend:
+    repository: ghcr.io/your-org/topscorers-backend
+    tag: latest
+    pullPolicy: IfNotPresent
+  frontend:
+    repository: ghcr.io/your-org/topscorers-frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+
+replicaCount:
+  backend: 1
+  frontend: 1
+
+service:
+  backend:
+    type: ClusterIP
+    port: 8080
+  frontend:
+    type: ClusterIP
+    port: 80
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: tops.your-domain.tld
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []  # voir README pour activer TLS
+
+backend:
+  env:
+    TOPS_LEAGUE_ID: "92556"
+    TOPS_TEAM_ID: "506387"
+    RECO_BUDGET: "10000000"
+  secretsRef: topscorers-secrets
+  resources:
+    requests: { cpu: 200m, memory: 400Mi }
+    limits:   { cpu: 500m, memory: 800Mi }
+
+frontend:
+  apiBase: ""  # vide = même origine via Ingress
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits:   { cpu: 200m, memory: 256Mi }
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

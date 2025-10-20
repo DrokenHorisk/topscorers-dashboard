@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.env
+
+
+# node/static
+node_modules/
+dist/
+
+
+# Mac/OS
+.DS_Store

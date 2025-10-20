@@ -1,0 +1,39 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: topscorers
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/your-org/topscorers-dashboard.git
+    targetRevision: main
+    path: charts/topscorers
+    helm:
+      values: |
+        image:
+          backend:
+            repository: ghcr.io/your-org/topscorers-backend
+            tag: latest
+          frontend:
+            repository: ghcr.io/your-org/topscorers-frontend
+            tag: latest
+        ingress:
+          enabled: true
+          className: nginx
+          hosts:
+            - host: tops.your-domain.tld
+              paths:
+                - path: /
+                  pathType: Prefix
+        backend:
+          secretsRef: topscorers-secrets
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: topscorers
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
