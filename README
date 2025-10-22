@@ -1,2 +1,7 @@
 Si tu veux changer la fréquence plus tard :
 kubectl -n topscorers set env deployment/topscorers-backend AUTO_GENERATE_INTERVAL_HOURS=6 puis rollout restart
+
+docker build -t ghcr.io/drokenhorisk/topscorers-discord-bot:latest -f discordbot/Dockerfile .
+docker push ghcr.io/drokenhorisk/topscorers-discord-bot:latest
+kubectl -n topscorers rollout restart deploy/topscorers-discord-bot
+kubectl -n topscorers logs deploy/topscorers-discord-bot -f
