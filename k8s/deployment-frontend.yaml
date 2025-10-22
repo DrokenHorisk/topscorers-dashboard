@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: topscorers-frontend
+  namespace: topscorers
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: topscorers-frontend }
+  template:
+    metadata:
+      labels: { app: topscorers-frontend }
+    spec:
+      containers:
+        - name: web
+          image: ghcr.io/drokenhorisk/topscorers-frontend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/nginx/html
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: topscorers-data

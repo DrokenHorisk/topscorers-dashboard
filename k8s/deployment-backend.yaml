@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: topscorers-backend
+  namespace: topscorers
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: topscorers-backend }
+  template:
+    metadata:
+      labels: { app: topscorers-backend }
+    spec:
+      containers:
+        - name: api
+          image: ghcr.io/drokenhorisk/topscorers-backend:latest
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef: { name: topscorers-config }
+            - secretRef: { name: topscorers-secrets }
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: topscorers-data

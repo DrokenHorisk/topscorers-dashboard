@@ -1,0 +1,17 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dashboard-generate
+  namespace: topscorers
+spec:
+  schedule: "*/30 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: runner
+              image: ghcr.io/drokenhorisk/topscorers-backend:latest
+              imagePullPolicy: Always
+              command: ["curl","-s","-X","POST","http://topscorers-backend:8000/api/generate"]
