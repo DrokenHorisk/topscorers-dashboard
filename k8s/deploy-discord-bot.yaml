@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: bot
-        image: ghcr.io/drokenhorisk/topscorers-discord-bot:redeploy-1761163200
+        image: ghcr.io/drokenhorisk/topscorers-discord-bot:latest
         imagePullPolicy: Always
         env:
           # Discord
