@@ -1,36 +1,97 @@
-import os
-import io
-import sys
-import asyncio
-import logging
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-import discord
+import os, io, sys, asyncio, logging, requests, discord
 from discord import app_commands
 from discord.ui import View, Button, Select
 
+# ==========================
+#  ENV
+# ==========================
+DISCORD_TOKEN       = os.getenv("DISCORD_TOKEN", "")
+DISCORD_CHANNEL_ID  = int(os.getenv("DISCORD_CHANNEL_ID", "0") or "0")
+DISCORD_GUILD_ID    = int(os.getenv("DISCORD_GUILD_ID", "0") or "0")
+TOPS_LEAGUE_ID      = int(os.getenv("TOPS_LEAGUE_ID", "0") or "0")
+
+OTHER_TEAM_IDS_ENV   = os.getenv("OTHER_TEAM_IDS", "")
+OTHER_TEAM_NAMES_ENV = os.getenv("OTHER_TEAM_NAMES", "")
+
+POLL_EVERY          = int(os.getenv("POLL_EVERY", "120") or "120")
+BACKEND_BASE_URL    = os.getenv("BACKEND_BASE_URL", "").rstrip("/")
+BASE                = "https://topscorers.ch"
+
 from topscorers import (
     login_session, fetch_market, fetch_price_series,
-    _price_features_from_series, BASE, POLL_EVERY, DISCORD_CHANNEL_ID
+    _price_features_from_series
 )
 
-# ---------- Logging ----------
-logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
-logging.info(f"PY {sys.version.split()[0]}  discord.py {discord.__version__}")
+# ==========================
+#  Logging
+# ==========================
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("bot")
+try:
+    log.info("PY %s  discord.py %s", sys.version.split()[0], discord.__version__)
+except Exception:
+    pass
 
+# ==========================
+#  Utils
+# ==========================
 def _fmt_num(x):
     try:
-        return f"{int(x):,}".replace(",", " ")
+        return f"{int(round(float(x))):,}".replace(",", " ")
     except Exception:
         return "—"
 
+def _parse_ids(s: str):
+    out = []
+    for tok in (s or "").replace(";", ",").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            v = int(tok)
+            if v not in out:
+                out.append(v)
+        except Exception:
+            pass
+    return out
 
-# ========== UI Views ==========
+def _parse_name_map(s: str):
+    out = {}
+    for tok in (s or "").split(","):
+        tok = tok.strip()
+        if not tok or "=" not in tok:
+            continue
+        k, v = tok.split("=", 1)
+        try:
+            out[int(k.strip())] = v.strip()
+        except Exception:
+            continue
+    return out
 
+def _chunk_strings(lines, max_chars=1800):
+    chunks, cur = [], []
+    cur_len = 0
+    for ln in lines:
+        add = len(ln) + 1
+        if cur and cur_len + add > max_chars:
+            chunks.append("\n".join(cur))
+            cur, cur_len = [], 0
+        cur.append(ln)
+        cur_len += add
+    if cur:
+        chunks.append("\n".join(cur))
+    return chunks
+
+# ==========================
+#  UI Views
+# ==========================
 class OfferView(View):
     def __init__(self, player_id: int, timeout: float = 300):
         super().__init__(timeout=timeout)
-        self.player_id = player_id
-        self.add_item(Button(label="Détails", style=discord.ButtonStyle.primary, custom_id=f"details:{player_id}"))
+        self.add_item(Button(label="Détails", style=discord.ButtonStyle.primary, custom_id=f"details:{int(player_id)}"))
 
 class TeamSelect(Select):
     def __init__(self, choices):
@@ -45,168 +106,172 @@ class TeamSelect(Select):
         super().__init__(placeholder="Choisis un manager…", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        sel = self.values[0]
-        # Répondre rapidement sans defer pour éviter "Unknown interaction"
-        msg = f"✅ Manager sélectionné — team_id **{sel}** (à brancher sur ton endpoint équipe)."
-        if not interaction.response.is_done():
-            await interaction.response.edit_message(content=msg, view=None)
-        else:
-            await interaction.followup.edit_message(interaction.message.id, content=msg, view=None)
+        # Déferer très vite (3s max Discord)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception as e:
+            log.warning(f"TeamSelect.defer failed: {e!r}")
+
+        team_id = int(self.values[0])
+        label = next((opt.label for opt in self.options if opt.value == str(team_id)), f"Équipe {team_id}")
+
+        bot = interaction.client  # type: ignore
+        assert isinstance(bot, TopscorerBot)
+        bot._ensure_login()
+
+        # 1) Essai endpoint “privé” (plus riche) -> /api/user/teams/{team_id}/players
+        # 2) Fallback endpoint “public”        -> /api/players?team={team_id}
+        players = []
+        used_endpoint = ""
+        try:
+            players = bot._fetch_user_team_players(team_id)
+            used_endpoint = f"{BASE}/api/user/teams/{team_id}/players"
+        except requests.HTTPError as e:
+            log.info(f"user_team_players failed for {team_id}: {e}. Fallback /api/players?team=")
+            try:
+                players = bot._fetch_team_roster_public(team_id)
+                used_endpoint = f"{BASE}/api/players?team={team_id}"
+            except Exception as e2:
+                await interaction.followup.send(f"❌ Impossible de charger l’équipe {team_id} : {e2}", ephemeral=True)
+                return
+        except Exception as e:
+            await interaction.followup.send(f"❌ Impossible de charger l’équipe {team_id} : {e}", ephemeral=True)
+            return
+
+        username = bot._best_effort_username(team_id)
+        club     = bot._best_effort_club(team_id)
+        header   = f"**Manager** : {username or label}\n**Club** : {club or '—'}\n_Source_: `{used_endpoint}`"
+
+        # Construire la liste complète
+        lines = []
+        for p in players:
+            pid = p.get("id")
+            n = p.get("name") or f"{p.get('firstname','')} {p.get('lastname','')}".strip() or f"#{pid or ''}"
+            pos = p.get("position_name") or p.get("position") or ""
+            mv  = p.get("marketvalue") or (p.get("stats_summary") or {}).get("marketvalue")
+            if mv is None:
+                mv = p.get("value")
+            lines.append(f"- {n} ({pos}) — MV: {_fmt_num(mv)}")
+
+        if not lines:
+            await interaction.followup.send(
+                content=f"✅ {label} — team_id **{team_id}**\n{header}\n\n*(aucun joueur trouvé)*",
+                ephemeral=True
+            )
+            return
+
+        chunks = _chunk_strings(lines, max_chars=1750)
+        await interaction.followup.send(
+            content=f"✅ {label} — team_id **{team_id}**\n{header}\n\n" + chunks[0],
+            ephemeral=True
+        )
+        for ch in chunks[1:]:
+            await interaction.followup.send(content=ch, ephemeral=True)
 
 class TeamSelectView(View):
     def __init__(self, choices, timeout: float = 180):
         super().__init__(timeout=timeout)
         self.add_item(TeamSelect(choices))
 
-
-# ========== Bot ==========
-
+# ==========================
+#  Bot
+# ==========================
 class TopscorerBot(discord.Client):
     def __init__(self, *, intents: discord.Intents):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
-        self.sess = None
+        self.sess: requests.Session | None = None
         self.last_seen_ids = set()
-        self.guild_obj = None
 
-        gid = os.getenv("DISCORD_GUILD_ID")
-        if gid:
-            try:
-                self.guild_obj = discord.Object(id=int(gid))
-                logging.info(f"Scope guilde forcé: {gid}")
-            except Exception:
-                logging.warning("DISCORD_GUILD_ID invalide; sync global en secours.")
+        self.guild_obj = discord.Object(id=DISCORD_GUILD_ID) if DISCORD_GUILD_ID else None
+        if DISCORD_GUILD_ID:
+            log.info("Scope guilde forcé: %s", DISCORD_GUILD_ID)
+        else:
+            log.info("Scope global (DISCORD_GUILD_ID non défini)")
 
-        self.league_id = os.getenv("TOPS_LEAGUE_ID", "92556")
-        self.other_team_ids = self._parse_ids(os.getenv("OTHER_TEAM_IDS", ""))
+        self.other_team_ids   = _parse_ids(OTHER_TEAM_IDS_ENV)
+        self.other_team_names = _parse_name_map(OTHER_TEAM_NAMES_ENV)
+        log.info("Managers ENV: %s", self.other_team_ids)
+        log.info("Managers names ENV: %s", self.other_team_names)
 
-    # ---- Helpers ----
-    @staticmethod
-    def _parse_ids(s):
-        out = []
-        for tok in (s or "").replace(";", ",").split(","):
-            tok = tok.strip()
-            if not tok:
-                continue
-            try:
-                out.append(int(tok))
-            except Exception:
-                pass
-        # dédup en gardant l’ordre
-        seen, dedup = set(), []
-        for x in out:
-            if x not in seen:
-                seen.add(x)
-                dedup.append(x)
-        return dedup
-
+    # -------- TopScorers API helpers --------
     def _ensure_login(self):
         if self.sess is None:
-            logging.info("Connexion à TopScorers…")
+            log.info("Connexion à TopScorers…")
             self.sess = login_session()
-            logging.info("Connecté à TopScorers")
+            log.info("Connecté à TopScorers")
 
-    # ====== helpers “dashboard-like” pour managers/club ======
-    @staticmethod
-    def _extract_username_from_payload(d):
-        if not isinstance(d, dict):
-            return ""
-        v = d.get("username")
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-        for k in ("user", "owner", "account"):
-            obj = d.get(k)
-            if isinstance(obj, dict):
-                for kk in ("username", "name", "display_name", "nickname"):
-                    v = obj.get(kk)
-                    if isinstance(v, str) and v.strip():
-                        return v.strip()
-        return ""
+    def _fetch_user_team_players(self, team_id: int) -> list[dict]:
+        assert self.sess is not None
+        r = self.sess.get(f"{BASE}/api/user/teams/{int(team_id)}/players", timeout=25)
+        r.raise_for_status()
+        j = r.json()
+        if isinstance(j, list):
+            return j
+        return j.get("data") or []
 
-    def _get_team_username(self, team_id: int):
-        """Essaye /stats puis /teams pour récupérer le username."""
-        for path in (
-            f"{BASE}/api/user/teams/{int(team_id)}/stats",
-            f"{BASE}/api/user/teams/{int(team_id)}",
-        ):
-            try:
-                r = self.sess.get(path, timeout=15)
-                if r.status_code != 200:
-                    continue
+    def _fetch_team_roster_public(self, team_id: int) -> list[dict]:
+        assert self.sess is not None
+        r = self.sess.get(f"{BASE}/api/players", params={"team": int(team_id)}, timeout=25)
+        r.raise_for_status()
+        j = r.json()
+        if isinstance(j, list):
+            return j
+        return j.get("data") or []
+
+    def _best_effort_username(self, team_id: int) -> str:
+        name = self.other_team_names.get(team_id)
+        if name:
+            return name
+        try:
+            assert self.sess is not None
+            r = self.sess.get(f"{BASE}/api/user/teams/{int(team_id)}", timeout=12)
+            if r.status_code == 200:
                 j = r.json()
-                d = j.get("data", j)
+                d = j.get("data") or j
                 if isinstance(d, list) and d:
                     d = d[0]
-                u = self._extract_username_from_payload(d)
-                if u:
-                    return u
-            except Exception:
-                continue
-        return ""
-
-    def _get_team_club(self, team_id: int):
-        """Récupère acronym / name du club associé à ce manager."""
-        try:
-            r = self.sess.get(f"{BASE}/api/user/teams/{int(team_id)}", timeout=15)
-            if r.status_code != 200:
-                return ""
-            j = r.json()
-            d = j.get("data", j)
-            if isinstance(d, list) and d:
-                d = d[0]
-            team_obj = d.get("team") or {}
-            return (team_obj.get("acronym") or team_obj.get("name") or "").strip()
-        except Exception:
-            return ""
-
-    def _get_league_managers(self):
-        """
-        Construit la liste (label=username, desc=club, value=team_id)
-         - à partir de OTHER_TEAM_IDS (toujours)
-         - + tente d’ajouter ceux de la ligue si l’endpoint fonctionne
-        """
-        choices = []
-
-        # 1) From OTHER_TEAM_IDS (fiable selon ton .env)
-        for tid in self.other_team_ids:
-            uname = self._get_team_username(tid) or f"Équipe {tid}"
-            club = self._get_team_club(tid)
-            choices.append((uname, club, tid))
-
-        # 2) Ligue (best-effort)
-        try:
-            r = self.sess.get(f"{BASE}/api/user/leagues/{int(self.league_id)}/teams", timeout=20)
-            r.raise_for_status()
-            data = (r.json().get("data") or [])
-            for t in data:
-                tid = t.get("id")
-                if not isinstance(tid, int):
-                    continue
-                uname = (
-                    t.get("username")
-                    or (t.get("user") or {}).get("username")
-                    or (t.get("user") or {}).get("name")
-                    or f"Équipe {tid}"
+                u = (
+                    d.get("username")
+                    or (d.get("user") or {}).get("username")
+                    or (d.get("owner") or {}).get("username")
+                    or (d.get("account") or {}).get("username")
                 )
-                team_obj = t.get("team") or {}
-                club = team_obj.get("acronym") or team_obj.get("name") or ""
-                choices.append((str(uname).strip(), str(club).strip(), tid))
-        except Exception as e:
-            logging.warning(f"Managers ligue: {e}")
+                if isinstance(u, str) and u.strip():
+                    return u.strip()
+        except Exception:
+            pass
+        return f"Équipe {team_id}"
 
-        # dédup par team_id en gardant le 1er
-        seen, dedup = set(), []
-        for (lab, desc, tid) in choices:
-            if tid in seen:
-                continue
-            seen.add(tid)
-            dedup.append((lab, desc, tid))
-
-        return dedup[:25] or [("Aucun manager", "", 0)]
-
-    def _get_player_brief(self, player_id: int):
-        """Retourne (name, team_acr, pos, marketvalue, points_avg)."""
+    def _best_effort_club(self, team_id: int) -> str:
         try:
+            assert self.sess is not None
+            r = self.sess.get(f"{BASE}/api/user/teams/{int(team_id)}", timeout=12)
+            if r.status_code == 200:
+                j = r.json()
+                d = j.get("data") or j
+                if isinstance(d, list) and d:
+                    d = d[0]
+                team_obj = d.get("team") or {}
+                club = team_obj.get("acronym") or team_obj.get("name")
+                if isinstance(club, str) and club.strip():
+                    return club.strip()
+        except Exception:
+            pass
+        return "—"
+
+    def _choices_from_env(self):
+        choices = []
+        for tid in self.other_team_ids:
+            label = self.other_team_names.get(tid) or f"Équipe {tid}"
+            desc  = ""
+            choices.append((label, desc, tid))
+        return choices[:25] if choices else [("Aucun manager", "", 0)]
+
+    # -------- Player brief (pour /details) --------
+    def _player_brief(self, player_id: int):
+        try:
+            assert self.sess is not None
             r = self.sess.get(f"{BASE}/api/players/{int(player_id)}", timeout=20)
             r.raise_for_status()
             j = r.json()
@@ -221,215 +286,178 @@ class TopscorerBot(discord.Client):
             pos = d.get("position_name") or d.get("position") or "—"
             mv = d.get("marketvalue") or (d.get("stats_summary") or {}).get("marketvalue")
             pts_avg = d.get("points_avg")
-
             if pts_avg is None:
                 pm = d.get("point_metrics") or []
                 if pm:
                     try:
                         pm_sorted = sorted(pm, key=lambda x: x.get("season", 0), reverse=True)
                         cur = pm_sorted[0] if pm_sorted else {}
-                        pts = cur.get("points")
-                        gms = cur.get("games")
+                        pts = cur.get("points"); gms = cur.get("games")
                         if pts is not None and gms:
-                            pts_avg = float(pts) / float(gms)
+                            pts_avg = float(pts)/float(gms)
                     except Exception:
                         pass
             return name, team_acr, pos, mv, pts_avg
-        except Exception:
+        except Exception as e:
+            log.warning(f"_player_brief fallback for {player_id}: {e!r}")
             return f"Joueur #{player_id}", "—", "—", None, None
 
-    # ---------- Commands ----------
-    async def setup_hook(self):
-        async def cmd_scan(interaction: discord.Interaction):
-            try:
-                self._ensure_login()
-                items = fetch_market(self.sess) or []
-                if not items:
-                    await interaction.response.send_message("Aucune offre trouvée pour le moment.")
-                    return
+    # ==========================
+    #  Slash Commands
+    # ==========================
+    async def _cmd_scan(self, interaction: discord.Interaction):
+        log.info("/scan invoked")
+        try:
+            await interaction.response.defer(ephemeral=False)
+        except Exception as e:
+            log.warning(f"/scan defer failed: {e!r}")
 
-                # première réponse
-                it0 = items[0]
-                p0 = it0.get("player", {}) if isinstance(it0, dict) else {}
-                team0 = p0.get("team") or {}
-                pid0 = p0.get("id")
-                name0 = p0.get("name") or f"{p0.get('firstname','')} {p0.get('lastname','')}".strip() or "Joueur"
-                pos0 = p0.get("position_name") or "—"
-                team_acr0 = team0.get("acronym") or team0.get("name") or "—"
-                mv0 = p0.get("marketvalue") or it0.get("marketvalue")
-                price0 = it0.get("price")
-                link0 = f"{BASE}/players/{pid0}" if pid0 else BASE
-                emb0 = discord.Embed(
-                    title=f"{name0} — {team_acr0} ({pos0})",
-                    url=link0,
-                    description=f"**Prix**: {_fmt_num(price0)}\n**Valeur marchée**: {_fmt_num(mv0)}",
-                    color=0xC8102E
+        try:
+            self._ensure_login()
+            items = fetch_market(self.sess) or []
+            log.info("/scan fetched %d offers", len(items))
+            if not items:
+                await interaction.followup.send("Aucune offre trouvée pour le moment.")
+                return
+
+            for it in items[:10]:
+                p = it.get("player", {}) if isinstance(it, dict) else {}
+                team = p.get("team") or {}
+                pid = p.get("id")
+                name = p.get("name") or f"{p.get('firstname','')} {p.get('lastname','')}".strip() or "Joueur"
+                pos = p.get("position_name") or "—"
+                team_acr = team.get("acronym") or team.get("name") or "—"
+                mv = p.get("marketvalue") or it.get("marketvalue")
+                price = it.get("price")
+                link = f"{BASE}/players/{pid}" if pid else BASE
+                emb = discord.Embed(
+                    title=f"{name} — {team_acr} ({pos})",
+                    url=link,
+                    description=f"**Prix**: {_fmt_num(price)}\n**Valeur marchée**: {_fmt_num(mv)}",
+                    color=0xC8102E,
                 )
-                view0 = OfferView(pid0) if pid0 else None
-                await interaction.response.send_message(embed=emb0, view=view0 if view0 else None)
+                view = OfferView(pid) if pid else None
+                await interaction.followup.send(embed=emb, view=view if view else None)
 
-                # suite
-                for it in items[1:5]:
-                    p = it.get("player", {}) if isinstance(it, dict) else {}
-                    team = p.get("team") or {}
-                    pid = p.get("id")
-                    name = p.get("name") or f"{p.get('firstname','')} {p.get('lastname','')}".strip() or "Joueur"
-                    pos = p.get("position_name") or "—"
-                    team_acr = team.get("acronym") or team.get("name") or "—"
-                    mv = p.get("marketvalue") or it.get("marketvalue")
-                    price = it.get("price")
-                    link = f"{BASE}/players/{pid}" if pid else BASE
-                    emb = discord.Embed(
-                        title=f"{name} — {team_acr} ({pos})",
-                        url=link,
-                        description=f"**Prix**: {_fmt_num(price)}\n**Valeur marchée**: {_fmt_num(mv)}",
-                        color=0xC8102E
-                    )
-                    view = OfferView(pid) if pid else None
-                    await interaction.followup.send(embed=emb, view=view if view else None)
-            except Exception as e:
-                logging.exception("/scan")
-                if not interaction.response.is_done():
-                    await interaction.response.send_message(f"Erreur pendant le scan : `{e}`")
-                else:
-                    await interaction.followup.send(f"Erreur pendant le scan : `{e}`")
-
-        async def cmd_marche(interaction: discord.Interaction):
+        except Exception as e:
+            log.exception("/scan error")
             try:
-                self._ensure_login()
-                items = fetch_market(self.sess) or []
-                if not items:
-                    await interaction.response.send_message("Marché vide pour le moment.")
-                    return
+                await interaction.followup.send(f"Erreur pendant le scan : `{e}`")
+            except Exception:
+                pass
 
-                it0 = items[0]
-                p0 = it0.get("player", {}) if isinstance(it0, dict) else {}
-                team0 = p0.get("team") or {}
-                pid0 = p0.get("id")
-                name0 = p0.get("name") or f"{p0.get('firstname','')} {p0.get('lastname','')}".strip() or "Joueur"
-                pos0 = p0.get("position_name") or "—"
-                team_acr0 = team0.get("acronym") or team0.get("name") or "—"
-                mv0 = p0.get("marketvalue") or it0.get("marketvalue")
-                price0 = it0.get("price")
-                link0 = f"{BASE}/players/{pid0}" if pid0 else BASE
-                emb0 = discord.Embed(
-                    title=f"{name0} — {team_acr0} ({pos0})",
-                    url=link0,
-                    description=f"**Prix**: {_fmt_num(price0)}\n**Valeur marchée**: {_fmt_num(mv0)}",
-                    color=0x5865F2
+    async def _cmd_marche(self, interaction: discord.Interaction):
+        log.info("/marche invoked")
+        try:
+            await interaction.response.defer(ephemeral=False)
+        except Exception as e:
+            log.warning(f"/marche defer failed: {e!r}")
+
+        try:
+            self._ensure_login()
+            items = fetch_market(self.sess) or []
+            log.info("/marche fetched %d offers", len(items))
+            if not items:
+                await interaction.followup.send("Marché vide pour le moment.")
+                return
+
+            for it in items[:10]:
+                p = it.get("player", {}) if isinstance(it, dict) else {}
+                team = p.get("team") or {}
+                pid = p.get("id")
+                name = p.get("name") or f"{p.get('firstname','')} {p.get('lastname','')}".strip() or "Joueur"
+                pos = p.get("position_name") or "—"
+                team_acr = team.get("acronym") or team.get("name") or "—"
+                mv = p.get("marketvalue") or it.get("marketvalue")
+                price = it.get("price")
+                link = f"{BASE}/players/{pid}" if pid else BASE
+                emb = discord.Embed(
+                    title=f"{name} — {team_acr} ({pos})",
+                    url=link,
+                    description=f"**Prix**: {_fmt_num(price)}\n**Valeur marchée**: {_fmt_num(mv)}",
+                    color=0x5865F2,
                 )
-                view0 = OfferView(pid0) if pid0 else None
-                await interaction.response.send_message(embed=emb0, view=view0 if view0 else None)
+                view = OfferView(pid) if pid else None
+                await interaction.followup.send(embed=emb, view=view if view else None)
 
-                for it in items[1:10]:
-                    p = it.get("player", {}) if isinstance(it, dict) else {}
-                    team = p.get("team") or {}
-                    pid = p.get("id")
-                    name = p.get("name") or f"{p.get('firstname','')} {p.get('lastname','')}".strip() or "Joueur"
-                    pos = p.get("position_name") or "—"
-                    team_acr = team.get("acronym") or team.get("name") or "—"
-                    mv = p.get("marketvalue") or it.get("marketvalue")
-                    price = it.get("price")
-                    link = f"{BASE}/players/{pid}" if pid else BASE
-                    emb = discord.Embed(
-                        title=f"{name} — {team_acr} ({pos})",
-                        url=link,
-                        description=f"**Prix**: {_fmt_num(price)}\n**Valeur marchée**: {_fmt_num(mv)}",
-                        color=0x5865F2
-                    )
-                    view = OfferView(pid) if pid else None
-                    await interaction.followup.send(embed=emb, view=view if view else None)
-            except Exception as e:
-                logging.exception("/marche")
-                if not interaction.response.is_done():
-                    await interaction.response.send_message(f"Erreur : `{e}`")
-                else:
-                    await interaction.followup.send(f"Erreur : `{e}`")
-
-        async def cmd_equipe(interaction: discord.Interaction):
+        except Exception as e:
+            log.exception("/marche error")
             try:
-                self._ensure_login()
-                choices = self._get_league_managers()
-                view = TeamSelectView(choices)
-                await interaction.response.send_message("Sélectionne un manager :", view=view, ephemeral=True)
-            except Exception as e:
-                logging.exception("/equipe")
+                await interaction.followup.send(f"Erreur : `{e}`")
+            except Exception:
+                pass
+
+    async def _cmd_equipe(self, interaction: discord.Interaction):
+        log.info("/equipe invoked")
+        try:
+            choices = self._choices_from_env()
+            log.info("/equipe choices from env: %s", choices)
+            view = TeamSelectView(choices)
+            await interaction.response.send_message("Sélectionne un manager :", view=view, ephemeral=True)
+        except Exception as e:
+            log.exception("/equipe error")
+            try:
                 if not interaction.response.is_done():
                     await interaction.response.send_message(f"Erreur : `{e}`", ephemeral=True)
                 else:
                     await interaction.followup.send(f"Erreur : `{e}`", ephemeral=True)
+            except Exception:
+                pass
 
-        # -------- Enregistrement des commandes (POSITIONNEL) --------
+    # ==========================
+    #  Setup / Sync
+    # ==========================
+    async def setup_hook(self):
+        # Création explicite des commandes
+        scan_cmd   = app_commands.Command(name="scan", description="Scanner immédiatement le marché.", callback=self._cmd_scan)
+        marche_cmd = app_commands.Command(name="marche", description="Lister le marché courant (10 offres max).", callback=self._cmd_marche)
+        equipe_cmd = app_commands.Command(name="equipe", description="Choisir un manager et afficher tout l’effectif.", callback=self._cmd_equipe)
+
         if self.guild_obj:
-            try:
-                # Nettoyage d'anciennes commandes de guilde
-                old = await self.tree.fetch_commands(guild=self.guild_obj)
-                if old:
-                    await self.tree.sync(guild=self.guild_obj, commands=[])
-                    logging.info(f"Anciennes commandes guilde {self.guild_obj.id} effacées.")
-                # Nettoyage global pour éviter les doublons
-                old_g = await self.tree.fetch_commands()
-                if old_g:
-                    await self.tree.sync(commands=[])
-                    logging.info("Anciennes commandes globales effacées.")
-            except Exception:
-                pass
-
-            # ⬇️  TOUT EN POSITIONNEL pour éviter le bug Parameter(name=...)
-            self.tree.add_command(app_commands.Command("scan", "Scanner immédiatement le marché.", cmd_scan), guild=self.guild_obj)
-            self.tree.add_command(app_commands.Command("marche", "Lister le marché courant (10 offres).", cmd_marche), guild=self.guild_obj)
-            self.tree.add_command(app_commands.Command("equipe", "Choisir un manager de la ligue.", cmd_equipe), guild=self.guild_obj)
-
-            try:
-                cmds_g = await self.tree.sync(guild=self.guild_obj)
-                logging.info(f"Slash commands synchronisées (guild {self.guild_obj.id}) : {[c.name for c in cmds_g]}")
-            except Exception:
-                logging.exception("Enregistrement/sync des commandes a échoué")
+            self.tree.clear_commands(guild=self.guild_obj)
+            self.tree.add_command(scan_cmd, guild=self.guild_obj)
+            self.tree.add_command(marche_cmd, guild=self.guild_obj)
+            self.tree.add_command(equipe_cmd, guild=self.guild_obj)
+            cmds = await self.tree.sync(guild=self.guild_obj)
+            log.info("Slash commands synchronisées (guild %s) : %s", self.guild_obj.id, [c.name for c in cmds])
         else:
-            try:
-                old_g = await self.tree.fetch_commands()
-                if old_g:
-                    await self.tree.sync(commands=[])
-                    logging.info("Anciennes commandes globales effacées.")
-            except Exception:
-                pass
+            self.tree.clear_commands()
+            self.tree.add_command(scan_cmd)
+            self.tree.add_command(marche_cmd)
+            self.tree.add_command(equipe_cmd)
+            cmds = await self.tree.sync()
+            log.info("Slash commands synchronisées (global) : %s", [c.name for c in cmds])
 
-            # ⬇️  TOUT EN POSITIONNEL ici aussi
-            self.tree.add_command(app_commands.Command("scan", "Scanner immédiatement le marché.", cmd_scan))
-            self.tree.add_command(app_commands.Command("marche", "Lister le marché courant (10 offres).", cmd_marche))
-            self.tree.add_command(app_commands.Command("equipe", "Choisir un manager de la ligue.", cmd_equipe))
-
-            try:
-                cmds = await self.tree.sync()
-                logging.info(f"Slash commands synchronisées (global) : {[c.name for c in cmds]}")
-            except Exception:
-                logging.exception("Enregistrement/sync des commandes (global) a échoué")
-
-    # ---------- Events ----------
+    # ==========================
+    #  Events
+    # ==========================
     async def on_ready(self):
-        logging.info(f"Discord connecté: {self.user}")
+        log.info("Discord connecté: %s", self.user)
         for g in self.guilds:
-            logging.info(f"[GUILD] {g.name} (id={g.id})")
+            log.info("[GUILD] %s (id=%s)", g.name, g.id)
             for c in g.text_channels[:10]:
-                logging.info(f"  - [CHAN] {c.name} (id={c.id})")
+                log.info("  - [CHAN] %s (id=%s)", c.name, c.id)
         asyncio.create_task(self.loop_poll())
 
     async def on_interaction(self, interaction: discord.Interaction):
         try:
             data = interaction.data or {}
-            cid = data.get("custom_id")
-            if not cid or not cid.startswith("details:"):
+            cid = (data.get("custom_id") or "")
+            if not cid.startswith("details:"):
                 return
             pid = int(cid.split(":", 1)[1])
             await self._send_player_details(interaction, pid)
         except Exception:
-            logging.exception("on_interaction failed")
+            log.exception("on_interaction failed")
 
     async def _send_player_details(self, interaction: discord.Interaction, player_id: int):
-        # Pas de defer ici pour éviter "Unknown interaction"
-        self._ensure_login()
+        try:
+            await interaction.response.defer(ephemeral=False)
+        except Exception as e:
+            log.warning(f"details defer failed: {e!r}")
 
-        name, team_acr, pos, mv, pts_avg = self._get_player_brief(player_id)
+        self._ensure_login()
+        name, team_acr, pos, mv, pts_avg = self._player_brief(player_id)
         s = fetch_price_series(self.sess, player_id)
         mv90, mvmax, mvmin, momentum, png = _price_features_from_series(s)
 
@@ -438,13 +466,12 @@ class TopscorerBot(discord.Client):
             lines.append(f"**Valeur marchée** : {_fmt_num(mv)}")
         if pts_avg is not None:
             lines.append(f"**Points moy.** : {float(pts_avg):.2f}")
-
         lines.append(
             "**Historique MV** : " +
             " · ".join([
-                f"90j: {_fmt_num(round(mv90))}" if mv90 is not None else "90j: —",
-                f"Min365: {_fmt_num(round(mvmin))}" if mvmin is not None else "Min365: —",
-                f"Max365: {_fmt_num(round(mvmax))}" if mvmax is not None else "Max365: —",
+                f"90j: {_fmt_num(mv90)}" if mv90 is not None else "90j: —",
+                f"Min365: {_fmt_num(mvmin)}" if mvmin is not None else "Min365: —",
+                f"Max365: {_fmt_num(mvmax)}" if mvmax is not None else "Max365: —",
                 f"Mom30: {momentum:.2f}%" if momentum is not None else "Mom30: —",
             ])
         )
@@ -461,28 +488,33 @@ class TopscorerBot(discord.Client):
             file = discord.File(io.BytesIO(png), filename=f"player_{player_id}_price.png")
             emb.set_image(url=f"attachment://player_{player_id}_price.png")
 
-        if not interaction.response.is_done():
-            await interaction.response.send_message(embed=emb, file=file)
-        else:
-            await interaction.followup.send(embed=emb, file=file)
+        await interaction.followup.send(embed=emb, file=file)
 
+    # ==========================
+    #  Poll loop
+    # ==========================
     async def loop_poll(self):
         await self.wait_until_ready()
+        chan = None
+        if DISCORD_CHANNEL_ID:
+            try:
+                chan = self.get_channel(DISCORD_CHANNEL_ID) or await self.fetch_channel(DISCORD_CHANNEL_ID)
+            except Exception:
+                chan = None
+
         while not self.is_closed():
             try:
                 self._ensure_login()
                 items = fetch_market(self.sess) or []
 
-                chan = None
-                if DISCORD_CHANNEL_ID:
-                    chan = self.get_channel(DISCORD_CHANNEL_ID) or await self.fetch_channel(DISCORD_CHANNEL_ID)
-
+                # log marché
                 new_items = []
                 for it in items:
                     iid = it.get("id")
                     if iid and iid not in self.last_seen_ids:
                         new_items.append(it)
                         self.last_seen_ids.add(iid)
+                log.info("poll: %d offres (%d nouvelles)", len(items), len(new_items))
 
                 if chan and new_items:
                     for it in new_items[:5]:
@@ -495,6 +527,7 @@ class TopscorerBot(discord.Client):
                         mv = p.get("marketvalue") or it.get("marketvalue")
                         price = it.get("price")
                         link = f"{BASE}/players/{pid}" if pid else BASE
+
                         emb = discord.Embed(
                             title=f"{name} — {team_acr} ({pos})",
                             url=link,
@@ -503,15 +536,14 @@ class TopscorerBot(discord.Client):
                         )
                         view = OfferView(pid) if pid else None
                         await chan.send(embed=emb, view=view if view else None)
-
-                await asyncio.sleep(POLL_EVERY)
             except Exception:
                 logging.exception("loop_poll")
-                await asyncio.sleep(5)
+            finally:
+                await asyncio.sleep(POLL_EVERY)
 
-
-# -------- Entrypoint --------
-
+# ==========================
+#  Entrypoint
+# ==========================
 async def main():
     intents = discord.Intents.none()
     intents.guilds = True
@@ -519,9 +551,9 @@ async def main():
     intents.message_content = False
 
     bot = TopscorerBot(intents=intents)
-    token = os.getenv("DISCORD_TOKEN")
+    token = DISCORD_TOKEN
     if not token:
-        logging.error("DISCORD_TOKEN manquant")
+        log.error("DISCORD_TOKEN manquant")
         return
     await bot.start(token)
 
