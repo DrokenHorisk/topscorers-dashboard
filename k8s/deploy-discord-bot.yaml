@@ -19,18 +19,31 @@ spec:
         env:
           # Discord
           - name: DISCORD_TOKEN
-            valueFrom: { secretKeyRef: { name: discord-bot-secrets, key: DISCORD_TOKEN } }
+            valueFrom:
+              secretKeyRef:
+                name: discord-bot-secrets
+                key: DISCORD_TOKEN
           - name: DISCORD_CHANNEL_ID
-            valueFrom: { secretKeyRef: { name: discord-bot-secrets, key: DISCORD_CHANNEL_ID } }
+            valueFrom:
+              secretKeyRef:
+                name: discord-bot-secrets
+                key: DISCORD_CHANNEL_ID
+
           # Scope guilde : slash-commands instantanées
           - name: DISCORD_GUILD_ID
             value: "1358465183596548298"
 
           # TopScorers (secrets existants)
           - name: TOPS_EMAIL
-            valueFrom: { secretKeyRef: { name: topscorers-secrets, key: TOPS_EMAIL } }
+            valueFrom:
+              secretKeyRef:
+                name: topscorers-secrets
+                key: TOPS_EMAIL
           - name: TOPS_PASSWORD
-            valueFrom: { secretKeyRef: { name: topscorers-secrets, key: TOPS_PASSWORD } }
+            valueFrom:
+              secretKeyRef:
+                name: topscorers-secrets
+                key: TOPS_PASSWORD
           - name: TOPS_LEAGUE_ID
             value: "92556"
 
@@ -38,14 +51,16 @@ spec:
           - name: OTHER_TEAM_IDS
             value: "506387,496919,472306,370769,413039,370497,370350,375986,423059"
           - name: OTHER_TEAM_NAMES
-            value: "506387=Droken,496919=Traxxx76,472306=ar1312,370769=Yo,413039=al,370497=Lauz22,370350=Ice,375986=Lawn,423059=Lauri"
+            value: "506387=Droken,496919=Traxxx76,472306=ar1312,370769=Yo,413039=al,370497=Lauz22,375986=Lawn,423059=Lauri"
 
           # Paramètres appli
-          - name: POLL_EVERY          # intervalle de scan marché (sec)
+          - name: POLL_EVERY
             value: "120"
           - name: BACKEND_BASE_URL
             value: "http://topscorers-backend:8080"
-          - name: SEEN_PATH           # persistance des transferts déjà postés
+          - name: PUBLIC_DASHBOARD_URL
+            value: "http://88.184.158.243:50080"
+          - name: SEEN_PATH
             value: "/data/seen_transfers.json"
 
         volumeMounts:

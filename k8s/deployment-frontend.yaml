@@ -1,3 +1,4 @@
+# k8s/deployment-frontend.yaml (ajouts marqués par ⬅)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -20,7 +21,15 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /usr/share/nginx/html
+            - name: nginx-conf                       # ⬅
+              mountPath: /etc/nginx/conf.d           # ⬅ (remplace tout le dossier conf.d)
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: topscorers-data
+        - name: nginx-conf                           # ⬅
+          configMap:
+            name: topscorers-frontend-nginx
+            items:
+              - key: default.conf
+                path: default.conf

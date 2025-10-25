@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, io, sys, asyncio, logging, requests, discord
+import os, io, sys, time, asyncio, logging, requests
+import discord
 from discord import app_commands
 from discord.ui import View, Button, Select
 
 # ==========================
 #  ENV
 # ==========================
-DISCORD_TOKEN        = os.getenv("DISCORD_TOKEN", "")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 
-# Backward-compat: single -> multi
 def _parse_ids_env(val: str) -> list[int]:
     out = []
     for tok in (val or "").replace(";", ",").split(","):
@@ -25,29 +25,28 @@ def _parse_ids_env(val: str) -> list[int]:
             pass
     return out
 
-# Guilds
-_g_multi = _parse_ids_env(os.getenv("DISCORD_GUILD_IDS", ""))
+# Multi-guild
+_g_multi  = _parse_ids_env(os.getenv("DISCORD_GUILD_IDS", ""))
 _g_single = int(os.getenv("DISCORD_GUILD_ID", "0") or "0")
 DISCORD_GUILD_IDS = _g_multi or ([ _g_single ] if _g_single else [])
 
-# Channels
-_c_multi = _parse_ids_env(os.getenv("DISCORD_CHANNEL_IDS", ""))
+# Multi-channel
+_c_multi  = _parse_ids_env(os.getenv("DISCORD_CHANNEL_IDS", ""))
 _c_single = int(os.getenv("DISCORD_CHANNEL_ID", "0") or "0")
-DISCORD_CHANNEL_IDS = _c_multi or ([ _c_single ] if _c_single else [])
-DISCORD_CHANNEL_IDS = [cid for cid in DISCORD_CHANNEL_IDS if cid]  # purge 0
+DISCORD_CHANNEL_IDS = [x for x in (_c_multi or ([ _c_single ] if _c_single else [])) if x]
 
 TOPS_LEAGUE_ID       = int(os.getenv("TOPS_LEAGUE_ID", "0") or "0")
-
 OTHER_TEAM_IDS_ENV   = os.getenv("OTHER_TEAM_IDS", "")
 OTHER_TEAM_NAMES_ENV = os.getenv("OTHER_TEAM_NAMES", "")
-
 POLL_EVERY           = int(os.getenv("POLL_EVERY", "120") or "120")
-BACKEND_BASE_URL     = os.getenv("BACKEND_BASE_URL", "").rstrip("/")
 BASE                 = "https://topscorers.ch"
 
+# Dashboard backend (ton vrai service)
+BACKEND_BASE_URL     = os.getenv("BACKEND_BASE_URL", "").rstrip("/")  # ex: http://topscorers-backend:8080
+PUBLIC_DASHBOARD_URL = os.getenv("PUBLIC_DASHBOARD_URL", "").rstrip("/")  # ex: http://88.184.158.243:50080
+
 from topscorers import (
-    login_session, fetch_market, fetch_price_series,
-    _price_features_from_series
+    login_session, fetch_market, fetch_price_series, _price_features_from_series
 )
 
 # ==========================
@@ -68,20 +67,6 @@ def _fmt_num(x):
         return f"{int(round(float(x))):,}".replace(",", " ")
     except Exception:
         return "—"
-
-def _parse_ids(s: str):
-    out = []
-    for tok in (s or "").replace(";", ",").split(","):
-        tok = tok.strip()
-        if not tok:
-            continue
-        try:
-            v = int(tok)
-            if v not in out:
-                out.append(v)
-        except Exception:
-            pass
-    return out
 
 def _parse_name_map(s: str):
     out = {}
@@ -130,9 +115,79 @@ def _sum_team_value(players: list[dict]) -> int | None:
 #  UI Views
 # ==========================
 class OfferView(View):
-    def __init__(self, player_id: int, timeout: float = 300):
+    def __init__(self, player_id: int, timeout: float = 1800):  # 30 minutes
         super().__init__(timeout=timeout)
-        self.add_item(Button(label="Détails", style=discord.ButtonStyle.primary, custom_id=f"details:{int(player_id)}"))
+        self.player_id = int(player_id)
+
+        btn = Button(
+            label="Détails",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"details:{self.player_id}"
+        )
+
+        async def _on_click(interaction: discord.Interaction):
+            # Ack rapide (éphémère) + log
+            log.info("Détails: click user=%s player_id=%s",
+                     getattr(interaction.user, "id", "?"), self.player_id)
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except Exception as e:
+                log.warning("interaction.defer failed: %r", e)
+
+            bot = interaction.client  # type: ignore
+            assert isinstance(bot, TopscorerBot)
+
+            # Session TopScorers
+            try:
+                bot._ensure_login()
+            except Exception as e:
+                await interaction.followup.send(f"❌ Connexion TopScorers impossible : {e}", ephemeral=True)
+                return
+
+            # Données + features
+            try:
+                s = fetch_price_series(bot.sess, self.player_id)
+                mv90, mvmax, mvmin, momentum, png = _price_features_from_series(s)
+            except Exception as e:
+                await interaction.followup.send(f"❌ Impossible de charger les détails : {e}", ephemeral=True)
+                return
+
+            link = f"{BASE}/players/{self.player_id}"
+            desc = []
+            if mv90 is not None:  desc.append(f"**MV 90 j** : {_fmt_num(mv90)}")
+            if mvmin is not None: desc.append(f"**Min 365 j** : {_fmt_num(mvmin)}")
+            if mvmax is not None: desc.append(f"**Max 365 j** : {_fmt_num(mvmax)}")
+            if momentum is not None:
+                sign = "▲" if momentum >= 0 else "▼"
+                desc.append(f"**Momentum 30 j** : {sign} {momentum:.1f}%")
+            if not desc:
+                desc.append("_Aucune métrique disponible_")
+
+            emb = discord.Embed(
+                title=f"Détails joueur #{self.player_id}",
+                url=link,
+                description="\n".join(desc),
+                color=0x2B7A0B,
+            )
+
+            files = []
+            if png:
+                try:
+                    buf = io.BytesIO(png); buf.seek(0)
+                    f = discord.File(buf, filename="mv.png")
+                    emb.set_image(url="attachment://mv.png")
+                    files = [f]
+                except Exception as e:
+                    log.warning("attach png failed: %r", e)
+
+            try:
+                await interaction.followup.send(embed=emb, files=files, ephemeral=True)
+            except Exception as e:
+                log.warning("followup.send failed: %r", e)
+
+        btn.callback = _on_click
+        self.add_item(btn)
+
 
 class TeamSelect(Select):
     def __init__(self, choices):
@@ -153,17 +208,16 @@ class TeamSelect(Select):
             log.warning(f"TeamSelect.defer failed: {e!r}")
 
         team_id = int(self.values[0])
-        label = next((opt.label for opt in self.options if opt.value == str(team_id)), f"Équipe {team_id}")
-
         bot = interaction.client  # type: ignore
         assert isinstance(bot, TopscorerBot)
         bot._ensure_login()
 
-        # 1) Endpoint privé
+        # Roster complet (privé -> public fallback)
+        import requests as _requests
         players = []
         try:
             players = bot._fetch_user_team_players(team_id)
-        except requests.HTTPError as e:
+        except _requests.HTTPError as e:
             log.info(f"user_team_players failed for {team_id}: {e}. Fallback /api/players?team=")
             try:
                 players = bot._fetch_team_roster_public(team_id)
@@ -202,17 +256,11 @@ class TeamSelect(Select):
             lines.append(f"- {n} ({pos}, {club_acr}) — MV: {_fmt_num(mv)}")
 
         if not lines:
-            await interaction.followup.send(
-                content=f"✅ {label}\n{header}\n\n*(aucun joueur trouvé)*",
-                ephemeral=True
-            )
+            await interaction.followup.send(content=f"✅ {header}\n\n*(aucun joueur trouvé)*", ephemeral=True)
             return
 
         chunks = _chunk_strings(lines, max_chars=1750)
-        await interaction.followup.send(
-            content=f"✅ {label}\n{header}\n\n" + chunks[0],
-            ephemeral=True
-        )
+        await interaction.followup.send(content=f"✅ {header}\n\n" + chunks[0], ephemeral=True)
         for ch in chunks[1:]:
             await interaction.followup.send(content=ch, ephemeral=True)
 
@@ -230,24 +278,65 @@ class TopscorerBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.sess: requests.Session | None = None
         self.last_seen_ids = set()
+        self._live_views: list[tuple[float, discord.ui.View]] = []  # (expire_ts, view)
 
-        # Multi-guild
         self.guild_objs = [discord.Object(id=g) for g in DISCORD_GUILD_IDS]
-        if self.guild_objs:
-            log.info("Scope guild(s): %s", [g.id for g in self.guild_objs])
-        else:
-            log.info("Scope global (aucun DISCORD_GUILD_IDS)")
-
-        # Multi-channel (cache des objets channel)
-        self.channel_ids = DISCORD_CHANNEL_IDS[:]  # list[int]
+        self.channel_ids = DISCORD_CHANNEL_IDS[:]
         self._channel_cache: dict[int, discord.abc.MessageableChannel] = {}
 
-        self.other_team_ids   = _parse_ids(OTHER_TEAM_IDS_ENV)
+        # Managers env
+        self.other_team_ids   = _parse_ids_env(OTHER_TEAM_IDS_ENV)
         self.other_team_names = _parse_name_map(OTHER_TEAM_NAMES_ENV)
-        log.info("Managers ENV: %s", self.other_team_ids)
-        log.info("Managers names ENV: %s", self.other_team_names)
 
-    # -------- TopScorers API helpers --------
+        # Dashboard cooldown (anti-spam)
+        self._last_dash_gen_ts = 0
+        self._dash_cooldown_s  = 90
+
+    def keep_view(self, view: discord.ui.View, ttl: float = 1900.0):
+        """Garde la View en vie ~31 min (légèrement > timeout du bouton)."""
+        now = time.time()
+        self._live_views.append((now + ttl, view))
+        # Purge légère si la liste grandit trop
+        if len(self._live_views) > 200:
+            t = time.time()
+            self._live_views = [(exp, v) for (exp, v) in self._live_views if exp > t]
+
+    # ---- Dashboard ----
+    async def _trigger_dashboard_generation(self) -> str | None:
+        """
+        Déclenche la génération côté backend sans bloquer l'event loop.
+        Retourne l'URL publique si définie, sinon fallback backend.
+        """
+        if not BACKEND_BASE_URL:
+            return None
+
+        now = time.time()
+        if now - self._last_dash_gen_ts >= self._dash_cooldown_s:
+            self._last_dash_gen_ts = now
+
+            async def _fire_and_forget():
+                def _do_post():
+                    try:
+                        # timeouts courts: (connect, read)
+                        requests.post(f"{BACKEND_BASE_URL}/api/generate", timeout=(2, 4))
+                    except Exception as e:
+                        log.warning("Génération backend (async) échouée: %r", e)
+
+                try:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, _do_post)
+                    log.info("Dashboard: POST /api/generate lancé en arrière-plan.")
+                except Exception as e:
+                    log.warning("run_in_executor failed: %r", e)
+
+            asyncio.create_task(_fire_and_forget())
+
+        # 👉 retourne la RACINE du frontend si présente
+        if PUBLIC_DASHBOARD_URL:
+            return f"{PUBLIC_DASHBOARD_URL}/"
+        return f"{BACKEND_BASE_URL}/api/dashboard"
+
+    # ---- API TopScorers ----
     def _ensure_login(self):
         if self.sess is None:
             log.info("Connexion à TopScorers…")
@@ -259,18 +348,14 @@ class TopscorerBot(discord.Client):
         r = self.sess.get(f"{BASE}/api/user/teams/{int(team_id)}/players", timeout=25)
         r.raise_for_status()
         j = r.json()
-        if isinstance(j, list):
-            return j
-        return j.get("data") or []
+        return j if isinstance(j, list) else j.get("data") or []
 
     def _fetch_team_roster_public(self, team_id: int) -> list[dict]:
         assert self.sess is not None
         r = self.sess.get(f"{BASE}/api/players", params={"team": int(team_id)}, timeout=25)
         r.raise_for_status()
         j = r.json()
-        if isinstance(j, list):
-            return j
-        return j.get("data") or []
+        return j if isinstance(j, list) else j.get("data") or []
 
     def _fetch_user_team_meta(self, team_id: int) -> dict:
         assert self.sess is not None
@@ -294,79 +379,30 @@ class TopscorerBot(discord.Client):
                 d = j.get("data") or j
                 if isinstance(d, list) and d:
                     d = d[0]
-                for key in ("username",):
-                    val = d.get(key)
-                    if isinstance(val, str) and val.strip():
-                        return val.strip()
-                for k in ("user", "owner", "account"):
-                    obj = d.get(k) or {}
-                    val = obj.get("username")
-                    if isinstance(val, str) and val.strip():
-                        return val.strip()
+                val = d.get("username") or (d.get("user") or {}).get("username")
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
         except Exception:
             pass
         return f"Équipe {team_id}"
 
     def _choices_from_env(self):
-        choices = []
-        for tid in self.other_team_ids:
-            label = self.other_team_names.get(tid) or f"Équipe {tid}"
-            desc  = ""
-            choices.append((label, desc, tid))
-        return choices[:25] if choices else [("Aucun manager", "", 0)]
-
-    # -------- Player brief (pour /details) --------
-    def _player_brief(self, player_id: int):
-        try:
-            assert self.sess is not None
-            r = self.sess.get(f"{BASE}/api/players/{int(player_id)}", timeout=20)
-            r.raise_for_status()
-            j = r.json()
-            d = j.get("data") or j
-            name = (
-                d.get("name")
-                or f"{d.get('firstname','')} {d.get('lastname','')}".strip()
-                or f"Joueur #{player_id}"
-            )
-            team = d.get("team") or {}
-            team_acr = team.get("acronym") or team.get("name") or "—"
-            pos = d.get("position_name") or d.get("position") or "—"
-            mv = d.get("marketvalue") or (d.get("stats_summary") or {}).get("marketvalue")
-            pts_avg = d.get("points_avg")
-            if pts_avg is None:
-                pm = d.get("point_metrics") or []
-                if pm:
-                    try:
-                        pm_sorted = sorted(pm, key=lambda x: x.get("season", 0), reverse=True)
-                        cur = pm_sorted[0] if pm_sorted else {}
-                        pts = cur.get("points"); gms = cur.get("games")
-                        if pts is not None and gms:
-                            pts_avg = float(pts)/float(gms)
-                    except Exception:
-                        pass
-            return name, team_acr, pos, mv, pts_avg
-        except Exception as e:
-            log.warning(f"_player_brief fallback for {player_id}: {e!r}")
-            return f"Joueur #{player_id}", "—", "—", None, None
+        return [(self.other_team_names.get(tid) or f"Équipe {tid}", "", tid) for tid in self.other_team_ids][:25]
 
     # ==========================
     #  Slash Commands
     # ==========================
     async def _cmd_scan(self, interaction: discord.Interaction):
-        log.info("/scan invoked")
         try:
             await interaction.response.defer(ephemeral=False)
-        except Exception as e:
-            log.warning(f"/scan defer failed: {e!r}")
-
+        except Exception:
+            pass
         try:
             self._ensure_login()
             items = fetch_market(self.sess) or []
-            log.info("/scan fetched %d offers", len(items))
             if not items:
                 await interaction.followup.send("Aucune offre trouvée pour le moment.")
                 return
-
             for it in items[:20]:
                 p = it.get("player", {}) if isinstance(it, dict) else {}
                 team = p.get("team") or {}
@@ -384,31 +420,24 @@ class TopscorerBot(discord.Client):
                     color=0xC8102E,
                 )
                 view = OfferView(pid) if pid else None
+                if view:
+                    self.keep_view(view)
                 await interaction.followup.send(embed=emb, view=view if view else None)
-
         except Exception as e:
-            log.exception("/scan error")
-            try:
-                await interaction.followup.send(f"Erreur pendant le scan : `{e}`")
-            except Exception:
-                pass
+            await interaction.followup.send(f"Erreur pendant le scan : `{e}`")
 
     async def _cmd_marche(self, interaction: discord.Interaction):
-        log.info("/marche invoked")
         try:
             await interaction.response.defer(ephemeral=False)
-        except Exception as e:
-            log.warning(f"/marche defer failed: {e!r}")
-
+        except Exception:
+            pass
         try:
             self._ensure_login()
             items = fetch_market(self.sess) or []
-            log.info("/marche fetched %d offers", len(items))
             if not items:
                 await interaction.followup.send("Marché vide pour le moment.")
                 return
-
-            for it in items[:10]:
+            for it in items[:20]:
                 p = it.get("player", {}) if isinstance(it, dict) else {}
                 team = p.get("team") or {}
                 pid = p.get("id")
@@ -425,129 +454,74 @@ class TopscorerBot(discord.Client):
                     color=0x5865F2,
                 )
                 view = OfferView(pid) if pid else None
+                if view:
+                    self.keep_view(view)
                 await interaction.followup.send(embed=emb, view=view if view else None)
-
         except Exception as e:
-            log.exception("/marche error")
-            try:
-                await interaction.followup.send(f"Erreur : `{e}`")
-            except Exception:
-                pass
+            await interaction.followup.send(f"Erreur : `{e}`")
 
     async def _cmd_equipe(self, interaction: discord.Interaction):
-        log.info("/equipe invoked")
-        try:
-            choices = self._choices_from_env()
-            log.info("/equipe choices from env: %s", choices)
-            view = TeamSelectView(choices)
-            await interaction.response.send_message("Sélectionne un manager :", view=view, ephemeral=True)
-        except Exception as e:
-            log.exception("/equipe error")
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.send_message(f"Erreur : `{e}`", ephemeral=True)
-                else:
-                    await interaction.followup.send(f"Erreur : `{e}`", ephemeral=True)
-            except Exception:
-                pass
+        choices = self._choices_from_env()
+        view = TeamSelectView(choices)
+        await interaction.response.send_message("Sélectionne un manager :", view=view, ephemeral=True)
 
-    async def _cmd_purge(self, interaction: discord.Interaction, nombre: int):
-        """Supprime X messages récents envoyés par le bot dans ce salon."""
-        # Permission côté utilisateur
-        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.manage_messages:
-            await interaction.response.send_message(
-                "❌ Tu n’as pas la permission de gérer les messages.", ephemeral=True
-            )
-            return
-
-        if nombre < 1 or nombre > 200:
-            await interaction.response.send_message(
-                "❌ Donne un nombre entre 1 et 200.", ephemeral=True
-            )
-            return
-
-        channel = interaction.channel
-        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
-            await interaction.response.send_message(
-                "❌ Cette commande doit être utilisée dans un salon texte.", ephemeral=True
-            )
-            return
-
+    async def _cmd_dashboard(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer(ephemeral=True)
         except Exception:
             pass
+        url = await self._trigger_dashboard_generation()
+        if url:
+            await interaction.followup.send(f"📊 Dashboard prêt : {url}", ephemeral=True)
+        else:
+            await interaction.followup.send("⚠️ BACKEND_BASE_URL non configuré sur le bot.", ephemeral=True)
 
-        # Collecte des messages du bot
-        target_msgs = []
-        async for msg in channel.history(limit=1000):
-            if msg.author.id == self.user.id:
-                target_msgs.append(msg)
-                if len(target_msgs) >= nombre:
-                    break
-
-        if not target_msgs:
-            await interaction.followup.send("Aucun message du bot à supprimer.", ephemeral=True)
+    async def _cmd_purge(self, interaction: discord.Interaction, count: int):
+        """Supprime jusqu’à N messages du bot dans ce salon."""
+        await interaction.response.defer(ephemeral=True)
+        ch = interaction.channel
+        me = self.user
+        if not isinstance(ch, (discord.TextChannel, discord.Thread, discord.ForumChannel)):
+            await interaction.followup.send("Ce type de salon n’est pas supporté.", ephemeral=True)
             return
-
-        # Discord limite le bulk delete aux messages < 14 jours
-        now = discord.utils.utcnow()
-        younger, older = [], []
-        for m in target_msgs:
-            if (now - m.created_at).days < 14:
-                younger.append(m)
-            else:
-                older.append(m)
-
-        deleted_count = 0
-
-        # Bulk par paquets de 100
-        for i in range(0, len(younger), 100):
-            chunk = younger[i:i+100]
-            try:
-                deleted = await channel.delete_messages(chunk)
-                deleted_count += len(deleted) if isinstance(deleted, list) else len(chunk)
-            except Exception:
-                # fallback suppression une à une
-                for m in chunk:
+        deleted = 0
+        try:
+            async for msg in ch.history(limit=max(10, min(500, count*5))):
+                if msg.author.id == me.id:
                     try:
-                        await m.delete()
-                        deleted_count += 1
+                        await msg.delete()
+                        deleted += 1
+                        if deleted >= count:
+                            break
                     except Exception:
                         pass
-
-        # Anciens messages: suppression unitaire
-        for m in older:
-            try:
-                await m.delete()
-                deleted_count += 1
-            except Exception:
-                pass
-
-        await interaction.followup.send(
-            f"🧹 Supprimé **{deleted_count}** message(s) du bot ici.", ephemeral=True
-        )
+        except Exception as e:
+            await interaction.followup.send(f"Erreur purge : {e}", ephemeral=True)
+            return
+        await interaction.followup.send(f"🧹 Supprimé {deleted} message(s) du bot.", ephemeral=True)
 
     # ==========================
     #  Setup / Sync
     # ==========================
     async def setup_hook(self):
-        scan_cmd   = app_commands.Command(name="scan",   description="Scanner immédiatement le marché.",                 callback=self._cmd_scan)
-        marche_cmd = app_commands.Command(name="marche", description="Lister le marché courant (10 offres max).",       callback=self._cmd_marche)
-        equipe_cmd = app_commands.Command(name="equipe", description="Choisir un manager et afficher tout l’effectif.", callback=self._cmd_equipe)
+        scan_cmd      = app_commands.Command(name="scan",      description="Scanner immédiatement le marché.",                       callback=self._cmd_scan)
+        marche_cmd    = app_commands.Command(name="marche",    description="Lister le marché courant (20 offres max).",             callback=self._cmd_marche)
+        equipe_cmd    = app_commands.Command(name="equipe",    description="Choisir un manager et afficher tout l’effectif.",       callback=self._cmd_equipe)
+        dashboard_cmd = app_commands.Command(name="dashboard", description="Générer (si besoin) et obtenir le lien du dashboard.",  callback=self._cmd_dashboard)
 
-        @app_commands.command(name="purge", description="Supprime X messages récents envoyés par le bot dans ce salon.")
-        @app_commands.describe(nombre="Nombre de messages du bot à supprimer (1–200)")
-        async def purge_cmd(interaction: discord.Interaction, nombre: int):
-            await self._cmd_purge(interaction, nombre)
+        @app_commands.command(name="purge", description="Supprimer X messages du bot dans ce salon.")
+        @app_commands.describe(count="Nombre de messages du bot à supprimer")
+        async def purge_cmd(interaction: discord.Interaction, count: int):
+            await self._cmd_purge(interaction, max(1, min(200, count)))
 
         if self.guild_objs:
             for g in self.guild_objs:
                 self.tree.clear_commands(guild=g)
-                self.tree.add_command(scan_cmd,   guild=g)
-                self.tree.add_command(marche_cmd, guild=g)
-                self.tree.add_command(equipe_cmd, guild=g)
-                self.tree.add_command(purge_cmd,  guild=g)
+                self.tree.add_command(scan_cmd,      guild=g)
+                self.tree.add_command(marche_cmd,    guild=g)
+                self.tree.add_command(equipe_cmd,    guild=g)
+                self.tree.add_command(dashboard_cmd, guild=g)
+                self.tree.add_command(purge_cmd,     guild=g)
                 cmds = await self.tree.sync(guild=g)
                 log.info("Slash commands synchronisées (guild %s) : %s", g.id, [c.name for c in cmds])
         else:
@@ -555,12 +529,13 @@ class TopscorerBot(discord.Client):
             self.tree.add_command(scan_cmd)
             self.tree.add_command(marche_cmd)
             self.tree.add_command(equipe_cmd)
+            self.tree.add_command(dashboard_cmd)
             self.tree.add_command(purge_cmd)
             cmds = await self.tree.sync()
             log.info("Slash commands synchronisées (global) : %s", [c.name for c in cmds])
 
     # ==========================
-    #  Events
+    #  Events / Poll loop
     # ==========================
     async def on_ready(self):
         log.info("Discord connecté: %s", self.user)
@@ -570,64 +545,9 @@ class TopscorerBot(discord.Client):
                 log.info("  - [CHAN] %s (id=%s)", c.name, c.id)
         asyncio.create_task(self.loop_poll())
 
-    async def on_interaction(self, interaction: discord.Interaction):
-        try:
-            data = interaction.data or {}
-            cid = (data.get("custom_id") or "")
-            if not cid.startswith("details:"):
-                return
-            pid = int(cid.split(":", 1)[1])
-            await self._send_player_details(interaction, pid)
-        except Exception:
-            log.exception("on_interaction failed")
-
-    async def _send_player_details(self, interaction: discord.Interaction, player_id: int):
-        try:
-            await interaction.response.defer(ephemeral=False)
-        except Exception as e:
-            log.warning(f"details defer failed: {e!r}")
-
-        self._ensure_login()
-        name, team_acr, pos, mv, pts_avg = self._player_brief(player_id)
-        s = fetch_price_series(self.sess, player_id)
-        mv90, mvmax, mvmin, momentum, png = _price_features_from_series(s)
-
-        lines = []
-        if mv is not None:
-            lines.append(f"**Valeur marchée** : {_fmt_num(mv)}")
-        if pts_avg is not None:
-            lines.append(f"**Points moy.** : {float(pts_avg):.2f}")
-        lines.append(
-            "**Historique MV** : " +
-            " · ".join([
-                f"90j: {_fmt_num(mv90)}" if mv90 is not None else "90j: —",
-                f"Min365: {_fmt_num(mvmin)}" if mvmin is not None else "Min365: —",
-                f"Max365: {_fmt_num(mvmax)}" if mvmax is not None else "Max365: —",
-                f"Mom30: {momentum:.2f}%" if momentum is not None else "Mom30: —",
-            ])
-        )
-
-        emb = discord.Embed(
-            title=f"{name} — {team_acr} ({pos})",
-            url=f"{BASE}/players/{player_id}",
-            description="\n".join(lines),
-            color=0x1F8B4C
-        )
-
-        file = None
-        if png:
-            file = discord.File(io.BytesIO(png), filename=f"player_{player_id}_price.png")
-            emb.set_image(url=f"attachment://player_{player_id}_price.png")
-
-        await interaction.followup.send(embed=emb, file=file)
-
-    # ==========================
-    #  Poll loop
-    # ==========================
     async def loop_poll(self):
         await self.wait_until_ready()
 
-        # Résoudre et mettre en cache les channels cibles
         async def _get_channel(ch_id: int):
             ch = self._channel_cache.get(ch_id)
             if ch:
@@ -644,7 +564,6 @@ class TopscorerBot(discord.Client):
             try:
                 self._ensure_login()
                 items = fetch_market(self.sess) or []
-
                 new_items = []
                 for it in items:
                     iid = it.get("id")
@@ -654,7 +573,6 @@ class TopscorerBot(discord.Client):
                 log.info("poll: %d offres (%d nouvelles)", len(items), len(new_items))
 
                 if new_items and self.channel_ids:
-                    # envoyer dans tous les salons listés
                     targets = []
                     for ch_id in self.channel_ids:
                         ch = await _get_channel(ch_id)
@@ -679,12 +597,18 @@ class TopscorerBot(discord.Client):
                             color=0xC8102E
                         )
                         view = OfferView(pid) if pid else None
-
+                        if view:
+                            self.keep_view(view)
                         for ch in targets:
                             try:
                                 await ch.send(embed=emb, view=view if view else None)
                             except Exception as e:
                                 log.warning("send to channel %s failed: %r", getattr(ch, "id", "?"), e)
+
+                    # Déclenche génération dashboard (cooldown) SANS bloquer
+                    url = await self._trigger_dashboard_generation()
+                    if url:
+                        log.info("Dashboard demandé → %s", url)
 
             except Exception:
                 logging.exception("loop_poll")
@@ -698,8 +622,6 @@ async def main():
     intents = discord.Intents.none()
     intents.guilds = True
     intents.messages = True
-    intents.message_content = False
-
     bot = TopscorerBot(intents=intents)
     token = DISCORD_TOKEN
     if not token:

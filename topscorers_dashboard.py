@@ -94,8 +94,6 @@ def build_html_page(sections, must_buy_threshold: float):
 </div>""")
 
     now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-    BOOTSTRAP_CSS = "https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
-    BOOTSTRAP_JS  = "https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
 
     return f"""<!doctype html>
 <html lang="fr"><head>
@@ -146,7 +144,6 @@ def build_html_page(sections, must_buy_threshold: float):
   table.table-sm td, table.table-sm th {{ padding:.42rem .6rem; vertical-align: middle; }}
   .table-wrapper {{ overflow-x:auto; }}
 
-  /* ✅ Forcer la couleur du texte dans les tableaux */
   .table td, .table th {{
     color: var(--lhc-text) !important;
   }}
@@ -155,7 +152,6 @@ def build_html_page(sections, must_buy_threshold: float):
     color: var(--lhc-muted) !important;
   }}
 
-  /* Liens des joueurs */
   table a.pm-open {{
     color: var(--lhc-text);
     text-decoration: none;
@@ -167,16 +163,15 @@ def build_html_page(sections, must_buy_threshold: float):
   }}
 
   .table .score-mustbuy td {{
-  background-color: #baf7d6 !important;
-  color: var(--lhc-black) !important;   /* 🔴 texte noir */
-  font-weight: 600;
-  text-shadow: none;
-}}
-
-.table .score-mustbuy a.pm-open {{
-  color: var(--lhc-black) !important;
-  text-decoration: underline;
-}}
+    background-color: #baf7d6 !important;
+    color: var(--lhc-black) !important;
+    font-weight: 600;
+    text-shadow: none;
+  }}
+  .table .score-mustbuy a.pm-open {{
+    color: var(--lhc-black) !important;
+    text-decoration: underline;
+  }}
 
   input.form-control-sm, select.form-select-sm {{
     background:#10141C; color:var(--lhc-text); border:1px solid var(--row-border);
@@ -186,20 +181,14 @@ def build_html_page(sections, must_buy_threshold: float):
     box-shadow: 0 0 0 .15rem rgba(200,16,46,.15);
   }}
 
-  /* Tri visuel */
   th.sort-asc::after  {{ content:" \\25B2"; font-size:.7em; color:var(--lhc-muted); }}
   th.sort-desc::after {{ content:" \\25BC"; font-size:.7em; color:var(--lhc-muted); }}
   th.sort-asc, th.sort-desc {{ color:#fff; }}
 
-  /* Must-buy */
-  .score-mustbuy td {{ background-color:#baf7d6 !important; text-shadow:0 1px 1px rgba(0,0,0,.15); }}
-
-  /* Badges */
   .badge-chip {{ display:inline-block; padding:.15rem .45rem; border-radius:.5rem; font-size:.75rem; border:1px solid #d0d5dd; white-space:nowrap; }}
   .chip-owner   {{ background:#ffffff; color:#000; border-color:#d0d5dd; }}
   .chip-foreign {{ background:#ffe3e7; color:#000; border-color:#ff9aa9; }}
 
-  /* Modal */
   .modal-content {{ background:var(--lhc-card); color:var(--lhc-text); border:1px solid var(--row-border); border-radius:16px; }}
   .modal-header, .modal-footer {{ border-color:var(--row-border); }}
   .pm-head {{ display:flex; align-items:center; gap:14px; }}
@@ -300,69 +289,111 @@ def build_html_page(sections, must_buy_threshold: float):
 <script>
 document.addEventListener('DOMContentLoaded', function () {{
 
-  // --- Filtre rapide ---
-  document.querySelectorAll('[data-quickfilter-table]').forEach(function(input){{
-    var tableId = input.getAttribute('data-quickfilter-table');
-    var tbl = document.getElementById(tableId);
-    if (!tbl || !tbl.tBodies || !tbl.tBodies[0]) return;
-    input.addEventListener('input', function(){{
-      var q = (this.value || '').toLowerCase();
-      Array.prototype.slice.call(tbl.tBodies[0].rows).forEach(function(row){{
-        var txt = row.innerText.toLowerCase();
-        row.style.display = (q === '' || txt.indexOf(q) !== -1) ? '' : 'none';
-      }});
-      if (tbl._pager) tbl._pager.rebuild();
-    }});
-  }});
+  /* ===========================
+     UTILITAIRES GÉNÉRAUX
+  =========================== */
 
-  // --- Tri colonnes ---
-  function enableTableSort(table) {{
+  function colIndexByName(table, namePartLower) {{
+    namePartLower = (namePartLower||'').toLowerCase();
+    if (!table || !table.tHead || !table.tHead.rows.length) return -1;
+    var ths = table.tHead.rows[0].cells;
+    for (var i=0;i<ths.length;i++) {{
+      var t = (ths[i].innerText||'').trim().toLowerCase();
+      if (t.indexOf(namePartLower) >= 0) return i;
+    }}
+    return -1;
+  }}
+
+  function initials(name) {{
+    if (!name) return '⚑';
+    var parts = name.trim().split(/\\s+/);
+    if (!parts.length) return '⚑';
+    var a = parts[0] ? parts[0].charAt(0) : '';
+    var b = parts.length>1 ? parts[parts.length-1].charAt(0) : '';
+    var up = (a+b).toUpperCase();
+    return up || '⚑';
+  }}
+
+  /* ===========================
+     FILTRE + TRI + PAGINATION (V2)
+     -> on garde toutes les lignes dans table._allRows
+     -> la pagination ne rend que la tranche visible
+  =========================== */
+
+  function cellText(row, idx) {{
+    var t = (row.cells[idx] ? row.cells[idx].innerText : '').trim();
+    return t;
+  }}
+
+  function attachQuickFilter(input, table) {{
+    if (!table._allRows) return;
+    input.addEventListener('input', function () {{
+      var q = (this.value || '').toLowerCase();
+      table._allRows.forEach(function (r) {{
+        var txt = (r._allTextCache || (r._allTextCache = r.innerText.toLowerCase()));
+        r.dataset.qmatch = (q === '' || txt.indexOf(q) !== -1) ? '1' : '0';
+      }});
+      if (table._pager) {{ table._pager.page = 1; table._pager.rebuild(); }}
+    }});
+  }}
+
+  function enableTableSortV2(table) {{
     if (!table || !table.tHead || !table.tBodies || !table.tBodies[0]) return;
     var ths = table.tHead.rows[0].cells;
-    Array.prototype.forEach.call(ths, function(th, idx){{
+    Array.prototype.forEach.call(ths, function (th, idx) {{
       th.style.cursor = 'pointer';
-      th.addEventListener('click', function(){{
-        var tbody = table.tBodies[0];
-        var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
+      th.addEventListener('click', function () {{
         var isAsc = !th.classList.contains('sort-asc');
-        Array.prototype.forEach.call(ths, function(other) {{
-          if (other !== th) other.classList.remove('sort-asc','sort-desc');
+
+        Array.prototype.forEach.call(ths, function (other) {{
+          if (other !== th) other.classList.remove('sort-asc', 'sort-desc');
         }});
         th.classList.toggle('sort-asc', isAsc);
         th.classList.toggle('sort-desc', !isAsc);
 
         var collator = new Intl.Collator(undefined, {{ numeric: true, sensitivity: 'base' }});
-        rows.sort(function(a,b){{
-          var aText = (a.cells[idx] ? a.cells[idx].innerText : '').trim();
-          var bText = (b.cells[idx] ? b.cells[idx].innerText : '').trim();
+        table._allRows.sort(function (a, b) {{
+          var aText = cellText(a, idx), bText = cellText(b, idx);
           return isAsc ? collator.compare(aText, bText) : collator.compare(bText, aText);
         }});
-        rows.forEach(function(r){{ tbody.appendChild(r); }});
-        if (table._pager) table._pager.rebuild();
+
+        if (table._pager) {{ table._pager.page = 1; table._pager.rebuild(); }}
       }});
     }});
   }}
 
-  // --- Pagination légère ---
-  function enablePager(table, pageSize) {{
+  function enablePagerV2(table, pageSize) {{
     if (!table || !table.tBodies || !table.tBodies[0]) return;
     var tbody = table.tBodies[0];
+
+    if (!table._allRows) {{
+      table._allRows = Array.prototype.slice.call(tbody.rows);
+      table._allRows.forEach(function (r) {{
+        if (!r.dataset) r.dataset = {{}};
+        if (!('qmatch' in r.dataset)) r.dataset.qmatch = '1';
+      }});
+    }}
+
+    function eligible() {{
+      return table._allRows.filter(function (r) {{ return r.dataset.qmatch !== '0'; }});
+    }}
+
     var pager = {{
       page: 1,
       size: pageSize || 25,
-      rebuild: function(){{
-        var all = Array.prototype.slice.call(tbody.rows);
-        var visible = all.filter(function(r){{ return r.style.display !== 'none'; }});
-        var total = visible.length;
+      rebuild: function () {{
+        var elig = eligible();
+        var total = elig.length;
         var pages = Math.max(1, Math.ceil(total / pager.size));
-        pager.page = Math.min(pager.page, pages);
+        if (pager.page > pages) pager.page = pages;
+
         var start = (pager.page - 1) * pager.size;
-        var end   = start + pager.size;
-        var i, r;
-        for (i=0;i<visible.length;i++) {{
-          r = visible[i];
-          r.style.display = (i >= start && i < end) ? '' : 'none';
-        }}
+        var end = start + pager.size;
+        var slice = elig.slice(start, end);
+
+        while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+        slice.forEach(function (r) {{ r.style.display = ''; tbody.appendChild(r); }});
+
         if (!table._pagerEl) {{
           table._pagerEl = document.createElement('div');
           table._pagerEl.className = 'd-flex justify-content-between align-items-center mt-2';
@@ -371,25 +402,29 @@ document.addEventListener('DOMContentLoaded', function () {{
         var info = 'Page ' + pager.page + ' / ' + pages + ' — ' + total + ' lignes';
         var btnPrev = '<button class="btn btn-sm btn-outline-light me-2" data-act="prev">&laquo;</button>';
         var btnNext = '<button class="btn btn-sm btn-outline-light ms-2" data-act="next">&raquo;</button>';
-        table._pagerEl.innerHTML = '<div class="small text-secondary">'+info+'</div><div>'+btnPrev+btnNext+'</div>';
-        table._pagerEl.querySelector('[data-act="prev"]').onclick = function(){{
+        table._pagerEl.innerHTML = '<div class="small text-secondary">' + info + '</div><div>' + btnPrev + btnNext + '</div>';
+        table._pagerEl.querySelector('[data-act="prev"]').onclick = function () {{
           if (pager.page > 1) {{ pager.page--; pager.rebuild(); }}
         }};
-        table._pagerEl.querySelector('[data-act="next"]').onclick = function(){{
+        table._pagerEl.querySelector('[data-act="next"]').onclick = function () {{
           if (pager.page < pages) {{ pager.page++; pager.rebuild(); }}
         }};
       }}
     }};
+
     table._pager = pager;
     pager.rebuild();
   }}
 
-  // --- Colonnes avancées (toggle) ---
+  /* ===========================
+     COLONNES AVANCÉES (toggle)
+  =========================== */
   function enableColumnToggles(table) {{
     if (!table || !table.tHead) return;
     var ths = table.tHead.rows[0].cells;
     var advCols = [];
     var advNames = ['mv 90','mv min','mv max','momentum 30','décote vs max','mv spark','team ptsavg','pts / 100k'];
+
     Array.prototype.forEach.call(ths, function(th, idx){{
       var name = (th.innerText||'').toLowerCase();
       for (var i=0;i<advNames.length;i++) {{
@@ -400,6 +435,7 @@ document.addEventListener('DOMContentLoaded', function () {{
 
     var wrapper = table.closest('.card');
     if (!wrapper) return;
+
     var bar = document.createElement('div');
     bar.className = 'd-flex justify-content-end mb-2';
     var btn = document.createElement('button');
@@ -407,6 +443,7 @@ document.addEventListener('DOMContentLoaded', function () {{
     btn.textContent = 'Colonnes avancées';
     btn.setAttribute('aria-pressed','false');
     var visible = false;
+
     btn.onclick = function(){{
       visible = !visible;
       btn.setAttribute('aria-pressed', visible ? 'true' : 'false');
@@ -432,7 +469,9 @@ document.addEventListener('DOMContentLoaded', function () {{
     toggleCols(false);
   }}
 
-  // --- Surlignage must-buy ---
+  /* ===========================
+     MUST-BUY (surlignage)
+  =========================== */
   function findScoreColIndex(tbl) {{
     if (tbl.tHead && tbl.tHead.rows.length) {{
       var headCells = tbl.tHead.rows[0].cells;
@@ -444,13 +483,12 @@ document.addEventListener('DOMContentLoaded', function () {{
     var rows = (tbl.tBodies && tbl.tBodies[0]) ? Array.prototype.slice.call(tbl.tBodies[0].rows) : [];
     if (rows.length) {{
       var lastIdx = rows[0].cells.length - 1;
-      var j, hits, trials, r, txt, v;
-      for (j=lastIdx; j>=0; j--) {{
-        hits=0; trials=0;
+      for (var j=lastIdx; j>=0; j--) {{
+        var hits=0, trials=0;
         for (var k=0; k<Math.min(5, rows.length); k++) {{
-          r = rows[k];
-          txt = (r.cells[j] ? r.cells[j].innerText : '').trim().replace(',', '.');
-          v = parseFloat(txt);
+          var r = rows[k];
+          var txt = (r.cells[j] ? r.cells[j].innerText : '').trim().replace(',', '.');
+          var v = parseFloat(txt);
           if (!isNaN(v)) hits++;
           trials++;
         }}
@@ -460,45 +498,92 @@ document.addEventListener('DOMContentLoaded', function () {{
     return -1;
   }}
 
+  // seuil injecté depuis Python
   var mustBuyThreshold = {must_buy_threshold:.2f};
+
   function colorizeMustBuy(tblId) {{
     var tbl = document.getElementById(tblId);
-    if (!tbl || !tbl.tBodies || !tbl.tBodies[0]) return;
-    var scoreIdx = findScoreColIndex(tbl);
-    if (scoreIdx < 0) return;
-    Array.prototype.slice.call(tbl.tBodies[0].rows).forEach(function(row){{
-      row.classList.remove('score-mustbuy');
-      var cell = row.cells[scoreIdx];
-      if (!cell) return;
-      var v = parseFloat((cell.innerText||'').replace(',', '.'));
-      if (!isNaN(v) && v >= mustBuyThreshold) row.classList.add('score-mustbuy');
-    }});
-  }}
-
-  // --- Helpers colonnes ---
-  function colIndexByName(table, namePartLower) {{
-    namePartLower = (namePartLower||'').toLowerCase();
-    if (!table || !table.tHead) return -1;
-    var ths = table.tHead.rows[0].cells;
-    for (var i=0;i<ths.length;i++) {{
-      var t = (ths[i].innerText||'').trim().toLowerCase();
-      if (t.indexOf(namePartLower) >= 0) return i;
+    if (!tbl) return;
+    // on se branche sur rebuild de la pagination pour recoloriser
+    function apply() {{
+      if (!tbl || !tbl.tBodies || !tbl.tBodies[0]) return;
+      var scoreIdx = findScoreColIndex(tbl);
+      if (scoreIdx < 0) return;
+      Array.prototype.slice.call(tbl.tBodies[0].rows).forEach(function(row){{
+        row.classList.remove('score-mustbuy');
+        var cell = row.cells[scoreIdx];
+        if (!cell) return;
+        var v = parseFloat((cell.innerText||'').replace(',', '.'));
+        if (!isNaN(v) && v >= mustBuyThreshold) row.classList.add('score-mustbuy');
+      }});
     }}
-    return -1;
+    // hook si pager existe, sinon timer court
+    if (tbl._pager) {{
+      var oldRebuild = tbl._pager.rebuild;
+      tbl._pager.rebuild = function() {{
+        oldRebuild.call(tbl._pager);
+        apply();
+      }};
+      tbl._pager.rebuild();
+    }} else {{
+      setTimeout(apply, 50);
+    }}
   }}
 
-  // --- Pop-up joueur (jolie) ---
+  /* ===========================
+     MODAL JOUEUR (ouverture depuis cellule "Joueur")
+  =========================== */
   var modalEl = document.getElementById('playerModal');
   var bsModal = modalEl ? new bootstrap.Modal(modalEl) : null;
 
-  function initials(name) {{
-    if (!name) return '⚑';
-    var parts = name.trim().split(/\\s+/);
-    if (!parts.length) return '⚑';
-    var a = parts[0] ? parts[0].charAt(0) : '';
-    var b = parts.length>1 ? parts[parts.length-1].charAt(0) : '';
-    var up = (a+b).toUpperCase();
-    return up || '⚑';
+  function openPlayerModalFromRow(tbl, row) {{
+    if (!bsModal) return;
+
+    function getIdx(name) {{ return colIndexByName(tbl, (name||'').toLowerCase()); }}
+    function getTxt(name) {{
+      var idx = getIdx(name); if (idx < 0) return '';
+      return (row.cells[idx] ? row.cells[idx].innerText : '').trim();
+    }}
+    function getHTML(name) {{
+      var idx = getIdx(name); if (idx < 0) return '';
+      return (row.cells[idx] ? row.cells[idx].innerHTML : '').trim();
+    }}
+
+    var name  = getTxt('joueur') || '—';
+    var team  = getTxt('équipe');
+    var pos   = getTxt('poste') || '—';
+    var pts   = getTxt('pts moy.') || getTxt('pts moy. (saison)') || '—';
+    var val   = getTxt('valeur marchée') || getTxt('valeur') || '—';
+    var prix  = getTxt('prix');
+    var alpha = getTxt('alphascore') || '—';
+    var spark = getHTML('mv spark');
+
+    modalEl.querySelector('#pmAvatar').textContent = initials(name);
+    modalEl.querySelector('#pmName').textContent   = name;
+    modalEl.querySelector('#pmTeamBadge').textContent = team ? team : '—';
+    modalEl.querySelector('#pmPosBadge').textContent  = pos;
+
+    modalEl.querySelector('#pmPts').textContent   = pts;
+    modalEl.querySelector('#pmVal').textContent   = prix ? (val + ' / ' + prix) : val;
+    modalEl.querySelector('#pmAlpha').textContent = alpha;
+
+    var sparkEl = modalEl.querySelector('#pmSpark');
+    sparkEl.innerHTML = spark || '<span class="text-secondary">Aucune donnée</span>';
+
+    var mv90   = getTxt('mv 90 j');
+    var mvmin  = getTxt('mv min 365 j');
+    var mvmax  = getTxt('mv max 365 j');
+    var mom30  = getTxt('momentum 30 j');
+    var discMx = getTxt('décote vs max 365');
+    var details = [];
+    if (mv90)  details.push('<b>MV 90 j</b> : ' + mv90);
+    if (mvmin) details.push('<b>Min 365 j</b> : ' + mvmin);
+    if (mvmax) details.push('<b>Max 365 j</b> : ' + mvmax);
+    if (mom30) details.push('<b>Momentum 30 j</b> : ' + mom30);
+    if (discMx)details.push('<b>Décote vs max 365</b> : ' + discMx);
+    modalEl.querySelector('#pmDetails').innerHTML = details.length ? details.join(' · ') : "<span class='text-secondary'>—</span>";
+
+    bsModal.show();
   }}
 
   function enhancePlayerCells(table) {{
@@ -523,82 +608,44 @@ document.addEventListener('DOMContentLoaded', function () {{
     }});
   }}
 
-  function openPlayerModalFromRow(tbl, row) {{
-    if (!bsModal) return;
-
-    function getTxt(colName) {{
-      var idx = colIndexByName(tbl, (colName||'').toLowerCase());
-      if (idx < 0) return '';
-      return (row.cells[idx] ? row.cells[idx].innerText : '').trim();
+  /* ===========================
+     INITIALISATION (V2)
+  =========================== */
+  document.querySelectorAll('table').forEach(function (tbl) {{
+    if (!tbl._allRows && tbl.tBodies && tbl.tBodies[0]) {{
+      tbl._allRows = Array.prototype.slice.call(tbl.tBodies[0].rows);
+      tbl._allRows.forEach(function (r) {{
+        if (!r.dataset) r.dataset = {{}};
+        if (!('qmatch' in r.dataset)) r.dataset.qmatch = '1';
+      }});
     }}
-    function getHTML(colName) {{
-      var idx = colIndexByName(tbl, (colName||'').toLowerCase());
-      if (idx < 0) return '';
-      return (row.cells[idx] ? row.cells[idx].innerHTML : '').trim();
-    }}
-
-    var name  = getTxt('joueur') || '—';
-    var team  = getTxt('équipe');
-    var pos   = getTxt('poste') || '—';
-    var pts   = getTxt('pts moy.') || getTxt('pts moy. (saison)') || '—';
-    var val   = getTxt('valeur marchée') || getTxt('valeur') || '—';
-    var prix  = getTxt('prix');
-    var alpha = getTxt('alphascore') || '—';
-    var spark = getHTML('mv spark');
-
-    // Header
-    modalEl.querySelector('#pmAvatar').textContent = initials(name);
-    modalEl.querySelector('#pmName').textContent   = name;
-    modalEl.querySelector('#pmTeamBadge').textContent = team ? team : '—';
-    modalEl.querySelector('#pmPosBadge').textContent  = pos;
-
-    // Body values
-    modalEl.querySelector('#pmPts').textContent   = pts;
-    var valTxt = val;
-    if (prix) valTxt = valTxt + ' / ' + prix;
-    modalEl.querySelector('#pmVal').textContent   = valTxt;
-    modalEl.querySelector('#pmAlpha').textContent = alpha;
-
-    var sparkEl = modalEl.querySelector('#pmSpark');
-    sparkEl.innerHTML = spark || '<span class="text-secondary">Aucune donnée</span>';
-
-    // détails
-    var mv90   = getTxt('mv 90 j');
-    var mvmin  = getTxt('mv min 365 j');
-    var mvmax  = getTxt('mv max 365 j');
-    var mom30  = getTxt('momentum 30 j');
-    var discMx = getTxt('décote vs max 365');
-    var details = [];
-    if (mv90)  details.push('<b>MV 90 j</b> : ' + mv90);
-    if (mvmin) details.push('<b>Min 365 j</b> : ' + mvmin);
-    if (mvmax) details.push('<b>Max 365 j</b> : ' + mvmax);
-    if (mom30) details.push('<b>Momentum 30 j</b> : ' + mom30);
-    if (discMx)details.push('<b>Décote vs max 365</b> : ' + discMx);
-    modalEl.querySelector('#pmDetails').innerHTML = details.length ? details.join(' · ') : "<span class='text-secondary'>—</span>";
-
-    bsModal.show();
-  }}
-
-  // --- Init: tri, pager, toggles, popups + must-buy ---
-  document.querySelectorAll('table').forEach(function(tbl){{
-    enableTableSort(tbl);
-    enablePager(tbl, 25);
+    enableTableSortV2(tbl);
+    enablePagerV2(tbl, 25);
     enableColumnToggles(tbl);
     enhancePlayerCells(tbl);
   }});
-  ['tblVentes','tblRecos','tblAllPlayers','tblOwners','tblTradePlan','tblByPos','tblUnder','tblOver'].forEach(colorizeMustBuy);
+
+  // Quickfilters branchés après init
+  document.querySelectorAll('[data-quickfilter-table]').forEach(function(input){{
+    var tableId = input.getAttribute('data-quickfilter-table');
+    var tbl = document.getElementById(tableId);
+    if (tbl) attachQuickFilter(input, tbl);
+  }});
+
+  // Coloriage must-buy pour les tables connues (ignore si absentes)
+  ['tblVentes','tblRecos','tblAllPlayers','tblOwners','tblTradePlan','tblByPos','tblUnder','tblOver']
+    .forEach(colorizeMustBuy);
 
 }});
 </script>
+
 </body></html>"""
 
 def df_to_html_table(df: pd.DataFrame, table_id: str, quick_placeholder="Filtrer…") -> str:
-    """Rend un tableau HTML + barre de recherche. Pas de JS inline ici (ajouté dans build_html_page)."""
     if df is None or df.empty:
         return "<div class='text-secondary'>Aucune donnée à afficher.</div>"
     df2 = df.copy().where(pd.notna(df), "")
 
-    # Cacher colonnes techniques ID
     drop_cols = [c for c in df2.columns if c.strip().lower() in ("id","id joueur","player id","player_id")]
     if drop_cols:
         df2 = df2.drop(columns=drop_cols)
@@ -606,7 +653,6 @@ def df_to_html_table(df: pd.DataFrame, table_id: str, quick_placeholder="Filtrer
     cols = list(df2.columns)
     thead = "<thead><tr>" + "".join(f"<th>{c}</th>" for c in cols) + "</tr></thead>"
 
-    # Marquer explicitement la cellule spark (meilleure mise en page SVG)
     rows_html = []
     for _, r in df2.iterrows():
         tds = []
@@ -754,36 +800,20 @@ def _spark_svg(series: pd.Series, width=180, height=40, stroke="#19C37D") -> str
 </svg>"""
 
 def _price_features_from_series(s: pd.Series):
-    """
-    Retourne:
-      mv90 (moyenne 90 j, sinon moyenne globale),
-      mvmax365 (max 365 j, sinon max global),
-      mvmin365 (min 365 j, sinon min global),
-      momentum_30j (% si possible),
-      spark_svg (toujours, basé sur fenêtre récente si possible, sinon global)
-    """
     if s is None or s.empty:
         return None, None, None, None, ""
     now = pd.Timestamp.now(tz="UTC")
     s = s.sort_index()
-
-    # 90 j -> fallback global
     s90   = s.loc[s.index >= (now - pd.Timedelta(days=90))]
     mv90  = float(s90.mean()) if not s90.empty else float(s.mean())
-
-    # 365 j -> fallback global
     s365  = s.loc[s.index >= (now - pd.Timedelta(days=365))]
     mvmax = float(s365.max()) if not s365.empty else float(s.max())
     mvmin = float(s365.min()) if not s365.empty else float(s.min())
-
-    # Momentum 30 j si au moins 2 points, sinon None
     s_tail = s.loc[s.index >= (now - pd.Timedelta(days=PRICE_MOMENTUM_DAYS))]
     momentum = None
     if len(s_tail) >= 2:
         first = float(s_tail.iloc[0]); last  = float(s_tail.iloc[-1])
         if first != 0: momentum = (last - first) / abs(first) * 100.0
-
-    # Sparkline: fenêtre PRICE_WINDOW_DAYS, sinon global
     swin = s.loc[s.index >= (now - pd.Timedelta(days=PRICE_WINDOW_DAYS))]
     if swin.empty: swin = s
     swin = swin.ffill(limit=3)

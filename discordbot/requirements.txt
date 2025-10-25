@@ -3,3 +3,5 @@ requests>=2.31
 matplotlib>=3.8
 pillow>=10
 pandas>=2.0
+jinja2
+plotly

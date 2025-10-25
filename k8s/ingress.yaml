@@ -4,10 +4,15 @@ metadata:
   name: topscorers-ingress
   namespace: topscorers
   annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
 spec:
+  tls:
+  - hosts:
+    - topscorers.example.com
+    secretName: topscorers-tls # si tu as déjà un secret TLS (sinon laisse tomber la section tls)
   rules:
-  - host:
+  - host: topscorers.example.com
     http:
       paths:
       - path: /

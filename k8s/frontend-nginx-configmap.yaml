@@ -1,0 +1,28 @@
+# k8s/frontend-nginx-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: topscorers-frontend-nginx
+  namespace: topscorers
+data:
+  default.conf: |
+    server {
+      listen 8080;
+      server_name _;
+
+      root /usr/share/nginx/html;
+      index dashboard_topscorers.html;
+
+      location / {
+        try_files $uri $uri/ /dashboard_topscorers.html;
+      }
+
+      # 🔁 Redirige /api/dashboard vers la racine du frontend
+      location = /api/dashboard {
+        return 302 /;
+      }
+
+      location /api/ {
+        proxy_pass http://topscorers-backend:8080/api/;
+      }
+    }
