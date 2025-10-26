@@ -315,21 +315,42 @@ document.addEventListener('DOMContentLoaded', function () {{
   }}
 
   /* ===========================
-     FILTRE + TRI + PAGINATION (V2)
-     -> on garde toutes les lignes dans table._allRows
-     -> la pagination ne rend que la tranche visible
+     TABLE MASTER CAPTURE (NOUVEAU)
+     -> préserve toutes les lignes dans table._allRowsMaster
+     -> _allRows est une vue triée/filtrée reconstruite depuis le master
   =========================== */
+
+  function captureAllRows(table) {{
+    if (!table || !table.tBodies || !table.tBodies[0]) return;
+    if (!table._allRowsMaster) {{
+      table._allRowsMaster = Array.prototype.slice.call(table.tBodies[0].rows);
+      table._allRowsMaster.forEach(function (r) {{
+        if (!r.dataset) r.dataset = {{}};
+        if (!('qmatch' in r.dataset)) r.dataset.qmatch = '1';
+      }});
+    }}
+    if (!table._allRows) {{
+      table._allRows = table._allRowsMaster.slice();
+    }}
+  }}
 
   function cellText(row, idx) {{
     var t = (row.cells[idx] ? row.cells[idx].innerText : '').trim();
     return t;
   }}
 
+  /* ===========================
+     FILTRE + TRI + PAGINATION (V2 corrigé)
+     -> filtrage et tri s’appliquent au MASTER
+  =========================== */
+
   function attachQuickFilter(input, table) {{
-    if (!table._allRows) return;
+    captureAllRows(table);
+    if (!table._allRowsMaster) return;
+
     input.addEventListener('input', function () {{
       var q = (this.value || '').toLowerCase();
-      table._allRows.forEach(function (r) {{
+      table._allRowsMaster.forEach(function (r) {{
         var txt = (r._allTextCache || (r._allTextCache = r.innerText.toLowerCase()));
         r.dataset.qmatch = (q === '' || txt.indexOf(q) !== -1) ? '1' : '0';
       }});
@@ -338,8 +359,10 @@ document.addEventListener('DOMContentLoaded', function () {{
   }}
 
   function enableTableSortV2(table) {{
+    captureAllRows(table);
     if (!table || !table.tHead || !table.tBodies || !table.tBodies[0]) return;
     var ths = table.tHead.rows[0].cells;
+
     Array.prototype.forEach.call(ths, function (th, idx) {{
       th.style.cursor = 'pointer';
       th.addEventListener('click', function () {{
@@ -351,8 +374,9 @@ document.addEventListener('DOMContentLoaded', function () {{
         th.classList.toggle('sort-asc', isAsc);
         th.classList.toggle('sort-desc', !isAsc);
 
+        // Tri sur l’ENSEMBLE des lignes (master)
         var collator = new Intl.Collator(undefined, {{ numeric: true, sensitivity: 'base' }});
-        table._allRows.sort(function (a, b) {{
+        table._allRows = table._allRowsMaster.slice().sort(function (a, b) {{
           var aText = cellText(a, idx), bText = cellText(b, idx);
           return isAsc ? collator.compare(aText, bText) : collator.compare(bText, aText);
         }});
@@ -365,17 +389,11 @@ document.addEventListener('DOMContentLoaded', function () {{
   function enablePagerV2(table, pageSize) {{
     if (!table || !table.tBodies || !table.tBodies[0]) return;
     var tbody = table.tBodies[0];
-
-    if (!table._allRows) {{
-      table._allRows = Array.prototype.slice.call(tbody.rows);
-      table._allRows.forEach(function (r) {{
-        if (!r.dataset) r.dataset = {{}};
-        if (!('qmatch' in r.dataset)) r.dataset.qmatch = '1';
-      }});
-    }}
+    captureAllRows(table);
+    if (!table._allRowsMaster) return;
 
     function eligible() {{
-      return table._allRows.filter(function (r) {{ return r.dataset.qmatch !== '0'; }});
+      return (table._allRows || table._allRowsMaster).filter(function (r) {{ return r.dataset.qmatch !== '0'; }});
     }}
 
     var pager = {{
@@ -400,13 +418,15 @@ document.addEventListener('DOMContentLoaded', function () {{
           table.parentNode.appendChild(table._pagerEl);
         }}
         var info = 'Page ' + pager.page + ' / ' + pages + ' — ' + total + ' lignes';
-        var btnPrev = '<button class="btn btn-sm btn-outline-light me-2" data-act="prev">&laquo;</button>';
-        var btnNext = '<button class="btn btn-sm btn-outline-light ms-2" data-act="next">&raquo;</button>';
+        var btnPrev = '<button class="btn btn-sm btn-outline-light me-2" data-act="prev" type="button">&laquo;</button>';
+        var btnNext = '<button class="btn btn-sm btn-outline-light ms-2" data-act="next" type="button">&raquo;</button>';
         table._pagerEl.innerHTML = '<div class="small text-secondary">' + info + '</div><div>' + btnPrev + btnNext + '</div>';
-        table._pagerEl.querySelector('[data-act="prev"]').onclick = function () {{
+        table._pagerEl.querySelector('[data-act="prev"]').onclick = function (ev) {{
+          ev.preventDefault();
           if (pager.page > 1) {{ pager.page--; pager.rebuild(); }}
         }};
-        table._pagerEl.querySelector('[data-act="next"]').onclick = function () {{
+        table._pagerEl.querySelector('[data-act="next"]').onclick = function (ev) {{
+          ev.preventDefault();
           if (pager.page < pages) {{ pager.page++; pager.rebuild(); }}
         }};
       }}
@@ -504,7 +524,6 @@ document.addEventListener('DOMContentLoaded', function () {{
   function colorizeMustBuy(tblId) {{
     var tbl = document.getElementById(tblId);
     if (!tbl) return;
-    // on se branche sur rebuild de la pagination pour recoloriser
     function apply() {{
       if (!tbl || !tbl.tBodies || !tbl.tBodies[0]) return;
       var scoreIdx = findScoreColIndex(tbl);
@@ -517,7 +536,6 @@ document.addEventListener('DOMContentLoaded', function () {{
         if (!isNaN(v) && v >= mustBuyThreshold) row.classList.add('score-mustbuy');
       }});
     }}
-    // hook si pager existe, sinon timer court
     if (tbl._pager) {{
       var oldRebuild = tbl._pager.rebuild;
       tbl._pager.rebuild = function() {{
@@ -531,7 +549,7 @@ document.addEventListener('DOMContentLoaded', function () {{
   }}
 
   /* ===========================
-     MODAL JOUEUR (ouverture depuis cellule "Joueur")
+     MODAL JOUEUR
   =========================== */
   var modalEl = document.getElementById('playerModal');
   var bsModal = modalEl ? new bootstrap.Modal(modalEl) : null;
@@ -609,23 +627,17 @@ document.addEventListener('DOMContentLoaded', function () {{
   }}
 
   /* ===========================
-     INITIALISATION (V2)
+     INITIALISATION (V2 corrigée)
   =========================== */
   document.querySelectorAll('table').forEach(function (tbl) {{
-    if (!tbl._allRows && tbl.tBodies && tbl.tBodies[0]) {{
-      tbl._allRows = Array.prototype.slice.call(tbl.tBodies[0].rows);
-      tbl._allRows.forEach(function (r) {{
-        if (!r.dataset) r.dataset = {{}};
-        if (!('qmatch' in r.dataset)) r.dataset.qmatch = '1';
-      }});
-    }}
+    captureAllRows(tbl);
     enableTableSortV2(tbl);
     enablePagerV2(tbl, 25);
     enableColumnToggles(tbl);
     enhancePlayerCells(tbl);
   }});
 
-  // Quickfilters branchés après init
+  // Quickfilters (agissent sur le MASTER)
   document.querySelectorAll('[data-quickfilter-table]').forEach(function(input){{
     var tableId = input.getAttribute('data-quickfilter-table');
     var tbl = document.getElementById(tableId);
@@ -1466,11 +1478,11 @@ def build_owner_rosters(s, my_team_id: str, other_team_ids_env: str,
                 "Joueur": f"{p.get('firstname','')} {p.get('lastname','')}".strip(),
                 "Poste": p.get("position_name"),
                 "Équipe": t.get("acronym") or t.get("name") or "",
+                "Propriétaire": owner_label,
                 "Points": p.get("points"),
                 "Pts moy.": p.get("points_avg"),
                 "Valeur": p.get("marketvalue"),
                 "Étranger": "Étranger" if bool(p.get("is_foreigner")) else "",
-                "Propriétaire": owner_label,
                 "Matchs (équipe)": t_games,
                 "Matchs (saison)": cur_games,
                 "Pts moy. (saison)": cur_avg,
@@ -1720,7 +1732,7 @@ def main():
 </div>"""
         })
     else:
-        sections.append({"id":"tabRecos","title":"Recommendations","content":"<div class='text-secondary'>Aucune recommandation.</div>"})
+        sections.append({"id":"tabRecos","title":"Recommandations","content":"<div class='text-secondary'>Aucune recommandation.</div>"})
 
     if not df_all_players_scored.empty:
         note = f"<div class='small text-secondary mb-2'>Équipes interrogées : {', '.join(map(str, team_ids))}. Détails joueur : {'ON' if ALL_PLAYERS_FETCH_DETAILS else 'OFF'}.</div>"
