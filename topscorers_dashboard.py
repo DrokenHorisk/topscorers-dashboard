@@ -1,14 +1,15 @@
 # topscorers_dashboard.py
-import os, sys, time, json, math
+import os, sys, time, json
 import datetime as dt
-import requests
-import pandas as pd
-import numpy as np
 from urllib.parse import unquote
+
+import numpy as np
+import pandas as pd
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
-pd.set_option('future.no_silent_downcasting', True)
+pd.set_option("future.no_silent_downcasting", True)
 
 # ----------------- CONFIG -----------------
 BASE = "https://topscorers.ch"
@@ -48,7 +49,7 @@ PRICE_MOMENTUM_DAYS = int(os.getenv("PRICE_MOMENTUM_DAYS", "30"))
 
 # Équipes pour "Tous les joueurs"
 DEFAULT_TEAMS = [103144,101152,102126,101150,101149,102127,102128,101139,101144,103138,103140,103141,101060,101151]
-ALL_PLAYERS_TEAMS_ENV = os.getenv("ALL_PLAYERS_TEAMS", "").strip()
+ALL_PLAYERS_TEAMS_ENV     = os.getenv("ALL_PLAYERS_TEAMS", "").strip()
 ALL_PLAYERS_FETCH_DETAILS = os.getenv("ALL_PLAYERS_FETCH_DETAILS", "1").strip().lower() in ("1","true","yes","on")
 
 # Équipes des autres managers
@@ -101,7 +102,6 @@ def build_html_page(sections, must_buy_threshold: float):
 <title>TopScorers — Dashboard</title>
 <link href="{BOOTSTRAP_CSS}" rel="stylesheet">
 <style>
-  /* ====== CHARTE LHC ====== */
   :root {{
     --lhc-red:#C8102E;
     --lhc-green:#19C37D;
@@ -112,7 +112,6 @@ def build_html_page(sections, must_buy_threshold: float):
     --lhc-muted:#C7CED9;
     --row-border:#2B3140;
 
-    /* Forcer Bootstrap */
     --bs-body-bg: var(--lhc-bg);
     --bs-body-color: var(--lhc-text);
     --bs-border-color: var(--row-border);
@@ -127,7 +126,6 @@ def build_html_page(sections, must_buy_threshold: float):
 
   body {{ background:var(--lhc-bg); color:var(--lhc-text); }}
   .text-secondary {{ color:var(--lhc-muted) !important; }}
-
   .brand {{ display:flex; align-items:center; gap:.75rem; }}
   .brand-logo {{
     height:44px; width:44px; border-radius:10px; background:#fff;
@@ -135,7 +133,6 @@ def build_html_page(sections, must_buy_threshold: float):
     box-shadow: 0 0 0 1px rgba(0,0,0,.4), 0 1px 6px rgba(0,0,0,.35);
   }}
   .brand-title {{ color:var(--lhc-red); font-weight:600; }}
-
   .nav-tabs .nav-link {{ color:var(--lhc-muted); }}
   .nav-tabs .nav-link.active {{ color:#fff; background:var(--lhc-red); border-color:var(--lhc-red); }}
 
@@ -144,23 +141,11 @@ def build_html_page(sections, must_buy_threshold: float):
   table.table-sm td, table.table-sm th {{ padding:.42rem .6rem; vertical-align: middle; }}
   .table-wrapper {{ overflow-x:auto; }}
 
-  .table td, .table th {{
-    color: var(--lhc-text) !important;
-  }}
-  .table th {{
-    font-weight: 600;
-    color: var(--lhc-muted) !important;
-  }}
+  .table td, .table th {{ color: var(--lhc-text) !important; }}
+  .table th {{ font-weight: 600; color: var(--lhc-muted) !important; }}
 
-  table a.pm-open {{
-    color: var(--lhc-text);
-    text-decoration: none;
-    font-weight: 500;
-  }}
-  table a.pm-open:hover {{
-    color: var(--lhc-red);
-    text-decoration: underline;
-  }}
+  table a.pm-open {{ color: var(--lhc-text); text-decoration: none; font-weight: 500; }}
+  table a.pm-open:hover {{ color: var(--lhc-red); text-decoration: underline; }}
 
   .table .score-mustbuy td {{
     background-color: #baf7d6 !important;
@@ -168,10 +153,7 @@ def build_html_page(sections, must_buy_threshold: float):
     font-weight: 600;
     text-shadow: none;
   }}
-  .table .score-mustbuy a.pm-open {{
-    color: var(--lhc-black) !important;
-    text-decoration: underline;
-  }}
+  .table .score-mustbuy a.pm-open {{ color: var(--lhc-black) !important; text-decoration: underline; }}
 
   input.form-control-sm, select.form-select-sm {{
     background:#10141C; color:var(--lhc-text); border:1px solid var(--row-border);
@@ -290,7 +272,7 @@ def build_html_page(sections, must_buy_threshold: float):
 document.addEventListener('DOMContentLoaded', function () {{
 
   /* ===========================
-     UTILITAIRES GÉNÉRAUX
+     UTILITAIRES
   =========================== */
 
   function colIndexByName(table, namePartLower) {{
@@ -315,33 +297,18 @@ document.addEventListener('DOMContentLoaded', function () {{
   }}
 
   /* ===========================
-     TABLE MASTER CAPTURE (NOUVEAU)
-     -> préserve toutes les lignes dans table._allRowsMaster
-     -> _allRows est une vue triée/filtrée reconstruite depuis le master
+     MASTER ROWS + FLAGS
+     - qtext  : filtre texte (quickfilter)
+     - qowner : filtre propriétaire / équipe
+     - qmatch : AND des deux
   =========================== */
 
-  function captureAllRows(table) {{
-    if (!table || !table.tBodies || !table.tBodies[0]) return;
-    if (!table._allRowsMaster) {{
-      table._allRowsMaster = Array.prototype.slice.call(table.tBodies[0].rows);
-      table._allRowsMaster.forEach(function (r) {{
-        if (!r.dataset) r.dataset = {{}};
-        if (!('qmatch' in r.dataset)) r.dataset.qmatch = '1';
-      }});
-    }}
-    if (!table._allRows) {{
-      table._allRows = table._allRowsMaster.slice();
-    }}
-  }}
-
   function cellText(row, idx) {{
-    var t = (row.cells[idx] ? row.cells[idx].innerText : '').trim();
-    return t;
+    return (row.cells[idx] ? row.cells[idx].innerText : '').trim();
   }}
 
   /* ===========================
-     FILTRE + TRI + PAGINATION (V2 corrigé)
-     -> filtrage et tri s’appliquent au MASTER
+     FILTRE / TRI / PAGER (V2)
   =========================== */
 
   function attachQuickFilter(input, table) {{
@@ -352,8 +319,9 @@ document.addEventListener('DOMContentLoaded', function () {{
       var q = (this.value || '').toLowerCase();
       table._allRowsMaster.forEach(function (r) {{
         var txt = (r._allTextCache || (r._allTextCache = r.innerText.toLowerCase()));
-        r.dataset.qmatch = (q === '' || txt.indexOf(q) !== -1) ? '1' : '0';
+        r.dataset.qtext = (q === '' || txt.indexOf(q) !== -1) ? '1' : '0';
       }});
+      recomputeEligibility(table);
       if (table._pager) {{ table._pager.page = 1; table._pager.rebuild(); }}
     }});
   }}
@@ -374,7 +342,6 @@ document.addEventListener('DOMContentLoaded', function () {{
         th.classList.toggle('sort-asc', isAsc);
         th.classList.toggle('sort-desc', !isAsc);
 
-        // Tri sur l’ENSEMBLE des lignes (master)
         var collator = new Intl.Collator(undefined, {{ numeric: true, sensitivity: 'base' }});
         table._allRows = table._allRowsMaster.slice().sort(function (a, b) {{
           var aText = cellText(a, idx), bText = cellText(b, idx);
@@ -393,7 +360,8 @@ document.addEventListener('DOMContentLoaded', function () {{
     if (!table._allRowsMaster) return;
 
     function eligible() {{
-      return (table._allRows || table._allRowsMaster).filter(function (r) {{ return r.dataset.qmatch !== '0'; }});
+      var src = (table._allRows || table._allRowsMaster);
+      return src.filter(function (r) {{ return r.dataset && r.dataset.qmatch !== '0'; }});
     }}
 
     var pager = {{
@@ -410,8 +378,14 @@ document.addEventListener('DOMContentLoaded', function () {{
         var slice = elig.slice(start, end);
 
         while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
-        slice.forEach(function (r) {{ r.style.display = ''; tbody.appendChild(r); }});
+        slice.forEach(function (r) {{
+          r.style.display = '';
+          tbody.appendChild(r);
+          // Enhancement systématique et idempotent
+          enhanceRowPlayerCell(table, r);
+        }});
 
+        // Pager UI
         if (!table._pagerEl) {{
           table._pagerEl = document.createElement('div');
           table._pagerEl.className = 'd-flex justify-content-between align-items-center mt-2';
@@ -429,15 +403,18 @@ document.addEventListener('DOMContentLoaded', function () {{
           ev.preventDefault();
           if (pager.page < pages) {{ pager.page++; pager.rebuild(); }}
         }};
+
+        // S'assure qu'un seul écouteur modal gère tous les liens (toutes pages)
+        attachModalDelegate(table);
       }}
-    }};
+  }};
 
     table._pager = pager;
     pager.rebuild();
   }}
 
   /* ===========================
-     COLONNES AVANCÉES (toggle)
+     COLONNES AVANCÉES
   =========================== */
   function enableColumnToggles(table) {{
     if (!table || !table.tHead) return;
@@ -490,7 +467,7 @@ document.addEventListener('DOMContentLoaded', function () {{
   }}
 
   /* ===========================
-     MUST-BUY (surlignage)
+     MUST-BUY (seuil dynamique)
   =========================== */
   function findScoreColIndex(tbl) {{
     if (tbl.tHead && tbl.tHead.rows.length) {{
@@ -518,7 +495,6 @@ document.addEventListener('DOMContentLoaded', function () {{
     return -1;
   }}
 
-  // seuil injecté depuis Python
   var mustBuyThreshold = {must_buy_threshold:.2f};
 
   function colorizeMustBuy(tblId) {{
@@ -604,53 +580,270 @@ document.addEventListener('DOMContentLoaded', function () {{
     bsModal.show();
   }}
 
-  function enhancePlayerCells(table) {{
-    if (!table || !table.tBodies || !table.tBodies[0]) return;
-    var idxJ = colIndexByName(table, 'joueur'); if (idxJ < 0) return;
-    Array.prototype.slice.call(table.tBodies[0].rows).forEach(function(row){{
-      var cell = row.cells[idxJ];
-      if (!cell) return;
-      if (cell.querySelector('a.pm-open')) return;
-      var name = (cell.innerText||'').trim();
-      if (!name) return;
-      var link = document.createElement('a');
-      link.href = '#';
-      link.className = 'pm-open';
-      link.textContent = name;
-      link.addEventListener('click', function(ev){{
-        ev.preventDefault();
-        openPlayerModalFromRow(table, row);
-      }});
-      cell.textContent = '';
-      cell.appendChild(link);
+  function attachModalDelegate(table) {{
+    if (!table || table._pmDelegateAttached) return;
+    table.addEventListener('click', function (e) {{
+      var a = e.target.closest('a.pm-open');
+      if (!a) return;
+      e.preventDefault();
+      var row = a.closest('tr');
+      if (row) openPlayerModalFromRow(table, row);
     }});
+    table._pmDelegateAttached = true;
   }}
 
+  function enhanceRowPlayerCell(table, row) {{
+    var idxJ = colIndexByName(table, 'joueur'); if (idxJ < 0) return;
+    var cell = row.cells[idxJ]; if (!cell) return;
+
+    // si déjà un lien .pm-open, ne rien faire
+    if (cell.querySelector('a.pm-open')) return;
+
+    var name = (cell.innerText || '').trim();
+    if (!name) return;
+
+    cell.textContent = '';
+    var link = document.createElement('a');
+    link.href = '#';
+    link.className = 'pm-open';
+    link.textContent = name;
+    cell.appendChild(link);
+  }}
+
+  function enhancePlayerCells(table) {{
+    if (!table || !table.tBodies || !table.tBodies[0]) return;
+    Array.prototype.slice.call(table.tBodies[0].rows).forEach(function(row){{
+      enhanceRowPlayerCell(table, row);
+    }});
+  }}
+  window.enhanceRowPlayerCell = enhanceRowPlayerCell;
+  window.attachModalDelegate  = attachModalDelegate;
   /* ===========================
-     INITIALISATION (V2 corrigée)
+     INIT (toutes les tables)
   =========================== */
   document.querySelectorAll('table').forEach(function (tbl) {{
     captureAllRows(tbl);
     enableTableSortV2(tbl);
     enablePagerV2(tbl, 25);
     enableColumnToggles(tbl);
-    enhancePlayerCells(tbl);
+    enhancePlayerCells(tbl); // liens pour la page courante
+    attachModalDelegate(tbl);
+
   }});
 
-  // Quickfilters (agissent sur le MASTER)
+  // Quickfilters
   document.querySelectorAll('[data-quickfilter-table]').forEach(function(input){{
     var tableId = input.getAttribute('data-quickfilter-table');
     var tbl = document.getElementById(tableId);
     if (tbl) attachQuickFilter(input, tbl);
   }});
 
-  // Coloriage must-buy pour les tables connues (ignore si absentes)
+  // Colorisation must-buy
   ['tblVentes','tblRecos','tblAllPlayers','tblOwners','tblTradePlan','tblByPos','tblUnder','tblOver']
     .forEach(colorizeMustBuy);
 
 }});
-</script>
 
+// ====== OUTILS GLOBALS pour l’onglet "Équipe" (stats cross-pages) ======
+function captureAllRows(table) {{
+    if (!table || !table.tBodies || !table.tBodies[0]) return;
+    if (!table._allRowsMaster) {{
+      table._allRowsMaster = Array.prototype.slice.call(table.tBodies[0].rows);
+      table._allRowsMaster.forEach(function (r) {{
+        if (!r.dataset) r.dataset = {{}};
+        if (!('qtext' in r.dataset))  r.dataset.qtext  = '1';
+        if (!('qowner' in r.dataset)) r.dataset.qowner = '1';
+        r.dataset.qmatch = (r.dataset.qtext !== '0' && r.dataset.qowner !== '0') ? '1' : '0';
+      }});
+    }}
+    if (!table._allRows) {{
+      table._allRows = table._allRowsMaster.slice();
+    }}
+  }}
+
+function recomputeEligibility(tbl) {{
+  if (!tbl || !tbl._allRowsMaster) return;
+
+  (tbl._allRowsMaster || []).forEach(function (row) {{
+    var qtextOk  = (row.dataset && row.dataset.qtext  !== '0');   // filtre texte
+    var qownerOk = (row.dataset && row.dataset.qowner !== '0');   // filtre propriétaire/équipe
+    row.dataset.qmatch = (qtextOk && qownerOk) ? '1' : '0';       // état combiné
+}});
+}}
+
+
+function norm(x) {{
+  return (x == null ? '' : String(x)).trim().replace(/\\s+/g, ' ');
+}}
+
+function eligibleRowsFromMaster(tbl) {{
+  var src = (tbl._allRows || tbl._allRowsMaster || []);
+  return src.filter(function (r) {{ return r.dataset && r.dataset.qmatch !== '0'; }});
+}}
+
+function getCellText(row, idx) {{
+  return (idx >= 0 && row.cells[idx] ? row.cells[idx].innerText : '').trim();
+}}
+function parseNum(x) {{
+  var s = (x||'').toString().replace(/\\s/g,'').replace(',', '.');
+  var v = parseFloat(s);
+  return isNaN(v) ? null : v;
+}}
+function famPoste(s) {{
+  s = (s||'').toUpperCase();
+  if (s.indexOf('G')===0) return 'G';
+  if (s.indexOf('D')===0) return 'D';
+  if (s.indexOf('C')===0) return 'C';
+  if (s.indexOf('W')>=0 || s.indexOf('AIL')>=0) return 'W';
+  return 'W';
+}}
+
+function applyOwnerTeamFilters(ownerSelId, teamSelId, tableId, summaryId, top5Id) {{
+  var ownerSel = document.getElementById(ownerSelId);
+  var teamSel  = document.getElementById(teamSelId);
+  var tbl      = document.getElementById(tableId);
+  var summary  = document.getElementById(summaryId);
+  var top5Div  = document.getElementById(top5Id);
+  if (!ownerSel || !teamSel || !tbl || !tbl.tBodies || !tbl.tBodies[0]) return;
+
+  function colIndex(namePart) {{
+    if (tbl.tHead && tbl.tHead.rows.length) {{
+      var ths = tbl.tHead.rows[0].cells;
+      for (var i=0;i<ths.length;i++) {{
+        var t = (ths[i].innerText || '').trim().toLowerCase();
+        if (t.indexOf(namePart.toLowerCase()) >= 0) return i;
+      }}
+    }}
+    return -1;
+  }}
+  var idxOwner   = colIndex('propriétaire');
+  var idxPoste   = colIndex('poste');
+  var idxTeam    = colIndex('équipe');
+  var idxValeur  = colIndex('valeur');
+  var idxPtsMoy  = colIndex('pts moy');
+  var idxPts100k = colIndex('pts / 100k');
+  var idxAlpha   = colIndex('alphascore');
+  var idxEtr     = colIndex('étranger');
+  var idxJoueur  = colIndex('joueur');
+
+  function recalc() {{
+      var ownerVal = norm(ownerSel.value);
+      var teamVal  = norm(teamSel.value);
+
+      captureAllRows(tbl);
+      (tbl._allRowsMaster || []).forEach(function (r) {{
+        var ownerTxt = norm(getCellText(r, idxOwner));
+        var teamTxt  = norm(getCellText(r, idxTeam));
+
+        var ownerOk = (ownerVal === '__ALL__' || ownerTxt === ownerVal);
+        var teamOk  = (teamVal  === '__ALL__' || teamTxt  === teamVal);
+
+        if (!r.dataset) r.dataset = {{}};
+        r.dataset.qowner = (ownerOk && teamOk) ? '1' : '0';
+      }});
+
+      recomputeEligibility(tbl);
+
+      // Rebuild pager et réapplique les liens modals sur la page courante
+    if (tbl._pager) {{ tbl._pager.page = 1; tbl._pager.rebuild(); }}
+
+// (Si pas de pager, on s'assure quand même que les liens existent)
+var _rows = (tbl && tbl.tBodies && tbl.tBodies[0]) ? tbl.tBodies[0].rows : null;
+if (_rows && _rows.length && window.enhanceRowPlayerCell) {{
+  for (var i = 0; i < _rows.length; i++) {{
+    window.enhanceRowPlayerCell(tbl, _rows[i]);
+  }}
+}}
+
+// S'assure qu'un seul écouteur modal gère tous les liens (toutes pages)
+if (window.attachModalDelegate) {{ window.attachModalDelegate(tbl); }}
+
+      // ---------- Stats + Top 5 sur les lignes visibles ----------
+      var visible = (tbl._allRows || tbl._allRowsMaster || []).filter(function (r) {{
+        return r.dataset && r.dataset.qmatch !== '0';
+      }});
+
+      if (!visible.length) {{
+        summary.innerHTML = "<div class='col-12 text-secondary'>Aucun joueur avec cette combinaison de filtres.</div>";
+        top5Div.innerHTML = "<span class='text-secondary'>—</span>";
+        return;
+      }}
+
+      var n = 0, sumValeur=0, sumPtsMoy=0, sumPts100k=0, sumAlpha=0, nbEtr=0;
+      var c=0,w=0,d=0,g=0;
+      var players = [];
+
+      visible.forEach(function (r) {{
+        var vValeur  = parseNum(getCellText(r, idxValeur));
+        var vPtsMoy  = parseNum(getCellText(r, idxPtsMoy));
+        var vPts100k = parseNum(getCellText(r, idxPts100k));
+        var vAlpha   = parseNum(getCellText(r, idxAlpha));
+        var vPoste   = getCellText(r, idxPoste);
+        var vEtrTxt  = getCellText(r, idxEtr);
+        var vJoueur  = getCellText(r, idxJoueur);
+        var vTeam    = getCellText(r, idxTeam);
+
+        n += 1;
+        if (vValeur!=null)  sumValeur += vValeur;
+        if (vPtsMoy!=null)  sumPtsMoy += vPtsMoy;
+        if (vPts100k!=null) sumPts100k += vPts100k;
+        if (vAlpha!=null)   sumAlpha += vAlpha;
+
+        var fam = famPoste(vPoste);
+        if (fam==='C') c++; else if (fam==='W') w++; else if (fam==='D') d++; else if (fam==='G') g++;
+
+        if ((vEtrTxt || '').toLowerCase().indexOf('étranger')>=0) nbEtr++;
+
+        players.push({{ joueur:vJoueur, poste:vPoste, equipe:vTeam, valeur:vValeur, ptsm:vPtsMoy, alpha:vAlpha }});
+      }});
+
+      var avgPtsM    = n? (sumPtsMoy/n) : 0;
+      var avgPts100k = n? (sumPts100k/n) : 0;
+      var avgAlpha   = n? (sumAlpha/n) : 0;
+      var pctEtr     = n? (100 * nbEtr / n) : 0;
+
+      var html = "";
+      html += "<div class='col-12 col-lg-8'><div class='row g-3'>";
+      html += "<div class='col-6 col-md-4'><div class='card p-3'><div class='small text-secondary'>Effectif filtré</div><div class='h5 m-0'>"+ n +"</div></div></div>";
+      html += "<div class='col-6 col-md-4'><div class='card p-3'><div class='small text-secondary'>Valeur totale</div><div class='h5 m-0'>"+ Math.round(sumValeur).toLocaleString('fr-CH') +"</div></div></div>";
+      html += "<div class='col-6 col-md-4'><div class='card p-3'><div class='small text-secondary'>Pts moy. (équipe)</div><div class='h5 m-0'>"+ avgPtsM.toFixed(2) +"</div></div></div>";
+      html += "<div class='col-6 col-md-4'><div class='card p-3'><div class='small text-secondary'>Pts / 100k (moy.)</div><div class='h5 m-0'>"+ avgPts100k.toFixed(2) +"</div></div></div>";
+      html += "<div class='col-6 col-md-4'><div class='card p-3'><div class='small text-secondary'>AlphaScore (moy.)</div><div class='h5 m-0'>"+ avgAlpha.toFixed(1) +"</div></div></div>";
+      html += "<div class='col-6 col-md-4'><div class='card p-3'><div class='small text-secondary'>Étrangers</div><div class='h5 m-0'>"+ nbEtr +" <span class='small text-secondary'>("+ pctEtr.toFixed(1) +"%)</span></div></div></div>";
+      html += "</div></div>";
+
+      html += "<div class='col-12 col-lg-4'><div class='card p-3'><div class='small text-secondary mb-2'>Répartition par poste</div>";
+      html += "<table class='table table-sm m-0'><thead><tr><th>Poste</th><th>#</th></tr></thead><tbody>";
+      html += "<tr><td>C</td><td>"+c+"</td></tr>";
+      html += "<tr><td>W</td><td>"+w+"</td></tr>";
+      html += "<tr><td>D</td><td>"+d+"</td></tr>";
+      html += "<tr><td>G</td><td>"+g+"</td></tr>";
+      html += "</tbody></table></div></div>";
+
+      summary.innerHTML = html;
+
+      players.sort(function(a,b){{ return (b.alpha||0) - (a.alpha||0); }});
+      var top5 = players.slice(0,5);
+      if (!top5.length) {{
+        top5Div.innerHTML = "<span class='text-secondary'>—</span>";
+      }} else {{
+        var rows = "";
+        top5.forEach(function(p){{
+          rows += "<tr><td>"+p.joueur+"</td><td>"+p.poste+"</td><td>"+p.equipe+"</td><td>"+ (p.valeur||0).toLocaleString('fr-CH') +"</td><td>"+ (p.ptsm!=null? p.ptsm.toFixed(2): '—') +"</td><td>"+ (p.alpha!=null? p.alpha.toFixed(1): '—') +"</td></tr>";
+      }});
+        top5Div.innerHTML = "<div class='table-wrapper'><table class='table table-sm w-100'><thead><tr><th>Joueur</th><th>Poste</th><th>Équipe</th><th>Valeur</th><th>Pts moy.</th><th>AlphaScore</th></tr></thead><tbody>"+rows+"</tbody></table></div>";
+      }}
+    }}
+
+    // première exécution + listeners
+    recalc();
+    ownerSel.addEventListener('change', recalc);
+    teamSel.addEventListener('change', recalc);
+
+    return {{ refresh: recalc }};
+  }}
+
+</script>
 </body></html>"""
 
 def df_to_html_table(df: pd.DataFrame, table_id: str, quick_placeholder="Filtrer…") -> str:
@@ -775,6 +968,46 @@ def _num_series(df: pd.DataFrame, col: str):
         return pd.Series([np.nan]*n, index=df.index, dtype="float64")
     except Exception:
         return pd.Series(dtype="float64")
+
+def _winsor_rankpct(s: pd.Series, lo=0.05, hi=0.95):
+    s = pd.to_numeric(s, errors="coerce")
+    if isinstance(s, pd.Series): x = s.copy()
+    else: x = pd.Series([s], dtype="float64")
+    if x.dropna().empty:
+        return pd.Series([None]*len(x), index=x.index)
+    ql, qh = x.quantile(lo), x.quantile(hi)
+    x = x.clip(lower=ql, upper=qh)
+    ranks = x.rank(pct=True)
+    return ranks
+
+def _safe_div(a, b):
+    a = pd.to_numeric(a, errors="coerce")
+    b = pd.to_numeric(b, errors="coerce")
+    return a / b.replace({0: np.nan})
+
+def _asfloat(s, fill=0.0):
+    if isinstance(s, pd.Series):
+        return pd.to_numeric(s, errors="coerce").fillna(fill).astype(float)
+    try:
+        return float(s)
+    except Exception:
+        return float(fill)
+
+def _round_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty: return df
+    df = df.copy()
+    num_cols = df.select_dtypes(include="number").columns.tolist()
+    for c in num_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce").round(2)
+    return df
+
+def blended_form(cur_avg, n1_avg, n2_avg, w_cur=FORM_W_CUR, w_n1=FORM_W_N1, w_n2=FORM_W_N2):
+    vals, w = [], 0.0
+    if pd.notna(cur_avg): vals.append((float(cur_avg), w_cur)); w += w_cur
+    if pd.notna(n1_avg):  vals.append((float(n1_avg),  w_n1));  w += w_n1
+    if pd.notna(n2_avg):  vals.append((float(n2_avg),  w_n2));  w += w_n2
+    if not vals or w == 0: return None
+    return sum(v*wt for v,wt in vals) / w
 
 # ----------------- PRICE HISTORY -----------------
 def _parse_marketvalue_series(detail_json: dict) -> pd.Series:
@@ -1037,47 +1270,6 @@ def fetch_team_roster(s, team_id: int) -> list:
     except Exception:
         return []
 
-# ----------------- NUM HELPERS -----------------
-def _winsor_rankpct(s: pd.Series, lo=0.05, hi=0.95):
-    s = pd.to_numeric(s, errors="coerce")
-    if isinstance(s, pd.Series): x = s.copy()
-    else: x = pd.Series([s], dtype="float64")
-    if x.dropna().empty:
-        return pd.Series([None]*len(x), index=x.index)
-    ql, qh = x.quantile(lo), x.quantile(hi)
-    x = x.clip(lower=ql, upper=qh)
-    ranks = x.rank(pct=True)
-    return ranks
-
-def _safe_div(a, b):
-    a = pd.to_numeric(a, errors="coerce")
-    b = pd.to_numeric(b, errors="coerce")
-    return a / b.replace({0: np.nan})
-
-def _asfloat(s, fill=0.0):
-    if isinstance(s, pd.Series):
-        return pd.to_numeric(s, errors="coerce").fillna(fill).astype(float)
-    try:
-        return float(s)
-    except Exception:
-        return float(fill)
-
-def _round_metrics(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty: return df
-    df = df.copy()
-    num_cols = df.select_dtypes(include="number").columns.tolist()
-    for c in num_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce").round(2)
-    return df
-
-def blended_form(cur_avg, n1_avg, n2_avg, w_cur=FORM_W_CUR, w_n1=FORM_W_N1, w_n2=FORM_W_N2):
-    vals, w = [], 0.0
-    if pd.notna(cur_avg): vals.append((float(cur_avg), w_cur)); w += w_cur
-    if pd.notna(n1_avg):  vals.append((float(n1_avg),  w_n1));  w += w_n1
-    if pd.notna(n2_avg):  vals.append((float(n2_avg),  w_n2));  w += w_n2
-    if not vals or w == 0: return None
-    return sum(v*wt for v,wt in vals) / w
-
 # ----------------- ALPHASCORE (affiché seulement) -----------------
 def compute_alpha_score(df):
     if df is None or df.empty: return df
@@ -1146,17 +1338,17 @@ def compute_alpha_score(df):
     score = _asfloat(score).clip(lower=0.0, upper=1.0)
     df["AlphaScore"] = (score*100.0).round(1)
 
-    # Badges
+    # Badges → en rendu HTML final uniquement (pas ici)
     if "Étranger" in df.columns:
-        df["Étranger"] = df["Étranger"].apply(lambda x: f"<span class='badge-chip chip-foreign'>Étranger</span>" if isinstance(x,str) and x.strip() else "")
+        df["Étranger"] = df["Étranger"].apply(lambda x: "Étranger" if isinstance(x,str) and x.strip() else "")
     if "Propriétaire" in df.columns:
-        df["Propriétaire"] = df["Propriétaire"].apply(lambda x: f"<span class='badge-chip chip-owner'>{x}</span>" if isinstance(x,str) and x.strip() else "")
+        df["Propriétaire"] = df["Propriétaire"].astype(str).str.strip()
 
     df["Usage"] = _safe_div(_num_series(df,"Matchs (saison)"),
                             _num_series(df,"Matchs (équipe)")).round(3)
     return _round_metrics(df).sort_values("AlphaScore", ascending=False)
 
-# ----------------- MARKET FETCH + PRICE FEATURES -----------------
+# ----------------- MARKET ENRICHED -----------------
 def fetch_market_enriched(s):
     r = s.get(f"{BASE}/api/user/leagues/{LEAGUE_ID}/transfers", timeout=20)
     r.raise_for_status()
@@ -1222,11 +1414,11 @@ def fetch_market_enriched(s):
         add.append(rec)
         time.sleep(0.04)
     df_add = pd.DataFrame(add)
-    base = base.merge(df_add, on="player.id", how="left")
+    base = df_add.merge(base, on="player.id", how="right")
 
     if "price" in base.columns and "MV_MAX_365" in base.columns:
-        base["discount_vs_max365_pct"] = ( (pd.to_numeric(base["MV_MAX_365"], errors="coerce") - pd.to_numeric(base["price"], errors="coerce")) /
-                                           pd.to_numeric(base["MV_MAX_365"], errors="coerce").replace(0, np.nan) ) * 100
+        base["discount_vs_max365_pct"] = ((pd.to_numeric(base["MV_MAX_365"], errors="coerce") - pd.to_numeric(base["price"], errors="coerce")) /
+                                          pd.to_numeric(base["MV_MAX_365"], errors="coerce").replace(0, np.nan)) * 100
 
     df_disp = base.copy()
     if "offers" in df_disp.columns:
@@ -1255,7 +1447,7 @@ def fetch_market_enriched(s):
 
     return sanitize_for_html(df_disp), base
 
-# ----------------- DECISION SCORE (interne pour recos) -----------------
+# ----------------- DECISION SCORE (internes recos) -----------------
 DECISION_W_PERF, DECISION_W_ROLE, DECISION_W_PHYS, DECISION_W_CONTR = 0.30, 0.25, 0.20, 0.25
 def _norm_rank(s):
     r = _winsor_rankpct(s)
@@ -1700,12 +1892,7 @@ def main():
 
     # Équipe (par propriétaire)
     df_team_by_owner = build_owner_rosters(
-        s,
-        TEAM_ID,
-        OTHER_TEAM_IDS_ENV,
-        OTHER_TEAM_NAMES_ENV,
-        team_games_map,
-        team_ptsavg_map
+        s, TEAM_ID, OTHER_TEAM_IDS_ENV, OTHER_TEAM_NAMES_ENV, team_games_map, team_ptsavg_map
     )
 
     # ---------- Sections ----------
@@ -1784,16 +1971,9 @@ def main():
   {team_table_html}
 </div>""",
             "script": """
-<script>
+  <script>
 document.addEventListener('DOMContentLoaded', function () {
-  var ownerSel = document.getElementById('ownerSelect');
-  var teamSel  = document.getElementById('teamSelect');
-  var tbl      = document.getElementById('tblOwners');
-  var summary  = document.getElementById('ownerSummary');
-  var top5Div  = document.getElementById('ownerTop5Table');
-  if (!ownerSel || !teamSel || !tbl || !tbl.tBodies || !tbl.tBodies[0]) return;
-
-  function colIndex(namePart) {
+  function colIndex(tbl, namePart) {
     if (tbl.tHead && tbl.tHead.rows.length) {
       var ths = tbl.tHead.rows[0].cells;
       for (var i=0;i<ths.length;i++) {
@@ -1803,123 +1983,34 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     return -1;
   }
-  var idxOwner   = colIndex('propriétaire');
-  var idxPoste   = colIndex('poste');
-  var idxTeam    = colIndex('équipe');
-  var idxValeur  = colIndex('valeur');
-  var idxPtsMoy  = colIndex('pts moy');
-  var idxPts100k = colIndex('pts / 100k');
-  var idxAlpha   = colIndex('alphascore');
-  var idxEtr     = colIndex('étranger');
-  var idxJoueur  = colIndex('joueur');
 
-  function parseNum(x) {
-    var s = (x||'').toString().replace(/\\s/g,'').replace(',', '.');
-    var v = parseFloat(s);
-    return isNaN(v) ? null : v;
-  }
+  var ownerSel = document.getElementById('ownerSelect');
+  var teamSel  = document.getElementById('teamSelect');
+  var tbl      = document.getElementById('tblOwners');
+  var summary  = document.getElementById('ownerSummary');
+  var top5Div  = document.getElementById('ownerTop5Table');
+  if (!ownerSel || !teamSel || !tbl || !tbl.tBodies || !tbl.tBodies[0]) return;
 
-  function famPoste(s) {
-    s = (s||'').toUpperCase();
-    if (s.indexOf('G')===0) return 'G';
-    if (s.indexOf('D')===0) return 'D';
-    if (s.indexOf('C')===0) return 'C';
-    if (s.indexOf('W')>=0 || s.indexOf('AIL')>=0) return 'W';
-    return 'W';
-  }
+  window.idxOwner   = colIndex(tbl, 'propriétaire');
+  window.idxPoste   = colIndex(tbl, 'poste');
+  window.idxTeam    = colIndex(tbl, 'équipe');
+  window.idxValeur  = colIndex(tbl, 'valeur');
+  window.idxPtsMoy  = colIndex(tbl, 'pts moy');
+  window.idxPts100k = colIndex(tbl, 'pts / 100k');
+  window.idxAlpha   = colIndex(tbl, 'alphascore');
+  window.idxEtr     = colIndex(tbl, 'étranger');
+  window.idxJoueur  = colIndex(tbl, 'joueur');
 
-  function applyFilters() {
-    var ownerVal = ownerSel.value;
-    var teamVal  = teamSel.value;
-    var rows = Array.prototype.slice.call(tbl.tBodies[0].rows);
+  var ownerTeamCtl = applyOwnerTeamFilters('ownerSelect','teamSelect','tblOwners','ownerSummary','ownerTop5Table');
 
-    rows.forEach(function(r){
-      var ownerTxt = (idxOwner>=0 ? (r.cells[idxOwner]? r.cells[idxOwner].innerText : '') : '').trim();
-      var teamTxt  = (idxTeam>=0  ? (r.cells[idxTeam]?  r.cells[idxTeam].innerText  : '') : '').trim();
-      var ownerOk = (ownerVal === '__ALL__' || ownerTxt === ownerVal);
-      var teamOk  = (teamVal  === '__ALL__' || teamTxt  === teamVal);
-      r.style.display = (ownerOk && teamOk) ? '' : 'none';
-    });
+  function refresh() { ownerTeamCtl.refresh(); }
 
-    var visible = rows.filter(function(r){ return r.style.display !== 'none'; });
-
-    if (!visible.length) {
-      summary.innerHTML = "<div class='col-12 text-secondary'>Aucun joueur avec cette combinaison de filtres.</div>";
-      top5Div.innerHTML = "<span class='text-secondary'>—</span>";
-      return;
-    }
-
-    var n = 0, sumValeur=0, sumPtsMoy=0, sumPts100k=0, sumAlpha=0, nbEtr=0;
-    var c=0,w=0,d=0,g=0;
-    var players = [];
-
-    visible.forEach(function(r){
-      var vValeur  = idxValeur>=0 ? parseNum(r.cells[idxValeur]? r.cells[idxValeur].innerText : '') : null;
-      var vPtsMoy  = idxPtsMoy>=0 ? parseNum(r.cells[idxPtsMoy]? r.cells[idxPtsMoy].innerText : '') : null;
-      var vPts100k = idxPts100k>=0 ? parseNum(r.cells[idxPts100k]? r.cells[idxPts100k].innerText : '') : null;
-      var vAlpha   = idxAlpha>=0 ? parseNum(r.cells[idxAlpha]? r.cells[idxAlpha].innerText : '') : null;
-      var vPoste   = idxPoste>=0 ? (r.cells[idxPoste]? r.cells[idxPoste].innerText : '') : '';
-      var vEtrTxt  = idxEtr>=0 ? (r.cells[idxEtr]? r.cells[idxEtr].innerText : '') : '';
-      var vJoueur  = idxJoueur>=0 ? (r.cells[idxJoueur]? r.cells[idxJoueur].innerText : '') : '';
-      var vTeam    = idxTeam>=0  ? (r.cells[idxTeam]?  r.cells[idxTeam].innerText  : '') : '';
-
-      n += 1;
-      if (vValeur!=null)  sumValeur += vValeur;
-      if (vPtsMoy!=null)  sumPtsMoy += vPtsMoy;
-      if (vPts100k!=null) sumPts100k += vPts100k;
-      if (vAlpha!=null)   sumAlpha += vAlpha;
-
-      var fam = famPoste(vPoste);
-      if (fam==='C') c++; else if (fam==='W') w++; else if (fam==='D') d++; else if (fam==='G') g++;
-
-      if ((vEtrTxt || '').toLowerCase().indexOf('étranger')>=0) nbEtr++;
-
-      players.push({ joueur:vJoueur, poste:vPoste, equipe:vTeam, valeur:vValeur, ptsm:vPtsMoy, alpha:vAlpha });
-    });
-
-    var avgPtsM    = n? (sumPtsMoy/n) : 0;
-    var avgPts100k = n? (sumPts100k/n) : 0;
-    var avgAlpha   = n? (sumAlpha/n) : 0;
-    var pctEtr     = n? (100 * nbEtr / n) : 0;
-
-    var html = "";
-    html += "<div class='col-12 col-lg-8'><div class='row g-3'>";
-    html += "<div class='col-6 col-md-4'><div class='card p-3'><div class='small text-secondary'>Effectif filtré</div><div class='h5 m-0'>"+ n +"</div></div></div>";
-    html += "<div class='col-6 col-md-4'><div class='card p-3'><div class='small text-secondary'>Valeur totale</div><div class='h5 m-0'>"+ Math.round(sumValeur).toLocaleString('fr-CH') +"</div></div></div>";
-    html += "<div class='col-6 col-md-4'><div class='card p-3'><div class='small text-secondary'>Pts moy. (équipe)</div><div class='h5 m-0'>"+ avgPtsM.toFixed(2) +"</div></div></div>";
-    html += "<div class='col-6 col-md-4'><div class='card p-3'><div class='small text-secondary'>Pts / 100k (moy.)</div><div class='h5 m-0'>"+ avgPts100k.toFixed(2) +"</div></div></div>";
-    html += "<div class='col-6 col-md-4'><div class='card p-3'><div class='small text-secondary'>AlphaScore (moy.)</div><div class='h5 m-0'>"+ avgAlpha.toFixed(1) +"</div></div></div>";
-    html += "<div class='col-6 col-md-4'><div class='card p-3'><div class='small text-secondary'>Étrangers</div><div class='h5 m-0'>"+ nbEtr +" <span class='small text-secondary'>("+ pctEtr.toFixed(1) +"%)</span></div></div></div>";
-    html += "</div></div>";
-
-    html += "<div class='col-12 col-lg-4'><div class='card p-3'><div class='small text-secondary mb-2'>Répartition par poste</div>";
-    html += "<table class='table table-sm m-0'><thead><tr><th>Poste</th><th>#</th></tr></thead><tbody>";
-    html += "<tr><td>C</td><td>"+c+"</td></tr>";
-    html += "<tr><td>W</td><td>"+w+"</td></tr>";
-    html += "<tr><td>D</td><td>"+d+"</td></tr>";
-    html += "<tr><td>G</td><td>"+g+"</td></tr>";
-    html += "</tbody></table></div></div>";
-
-    summary.innerHTML = html;
-
-    players.sort(function(a,b){ return (b.alpha||0) - (a.alpha||0); });
-    var top5 = players.slice(0,5);
-    if (!top5.length) {
-      top5Div.innerHTML = "<span class='text-secondary'>—</span>";
-    } else {
-      var rows = "";
-      top5.forEach(function(p){
-        rows += "<tr><td>"+p.joueur+"</td><td>"+p.poste+"</td><td>"+p.equipe+"</td><td>"+ (p.valeur||0).toLocaleString('fr-CH') +"</td><td>"+ (p.ptsm!=null? p.ptsm.toFixed(2): '—') +"</td><td>"+ (p.alpha!=null? p.alpha.toFixed(1): '—') +"</td></tr>";
-      });
-      top5Div.innerHTML = "<div class='table-wrapper'><table class='table table-sm w-100'><thead><tr><th>Joueur</th><th>Poste</th><th>Équipe</th><th>Valeur</th><th>Pts moy.</th><th>AlphaScore</th></tr></thead><tbody>"+rows+"</tbody></table></div>";
-    }
-  }
-
-  ownerSel.addEventListener('change', applyFilters);
-  teamSel.addEventListener('change', applyFilters);
-  applyFilters();
+  ownerSel.addEventListener('change', refresh);
+  teamSel.addEventListener('change', refresh);
+  refresh();
 });
 </script>
+
 """
         })
     else:
