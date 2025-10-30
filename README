@@ -5,3 +5,27 @@ docker build -t ghcr.io/drokenhorisk/topscorers-discord-bot:latest -f discordbot
 docker push ghcr.io/drokenhorisk/topscorers-discord-bot:latest
 kubectl -n topscorers rollout restart deploy/topscorers-discord-bot
 kubectl -n topscorers logs deploy/topscorers-discord-bot -f
+
+
+GIT_SHA=$(git rev-parse --short HEAD) && \
+IMAGE=ghcr.io/drokenhorisk/topscorers-discord-bot && \
+docker build --no-cache -t $IMAGE:$GIT_SHA -t $IMAGE:latest -f discordbot/Dockerfile . && \
+docker push $IMAGE:$GIT_SHA && \
+docker push $IMAGE:latest && \
+kubectl -n topscorers rollout restart deploy/topscorers-discord-bot && \
+kubectl -n topscorers rollout status deploy/topscorers-discord-bot
+kubectl -n topscorers exec deploy/topscorers-backend -- rm -f /data/dashboard_topscorers.html
+
+IMAGE_F=ghcr.io/drokenhorisk/topscorers-frontend
+docker build -f frontend/Dockerfile --build-arg CACHE_BUST=$(date +%s) -t $IMAGE_F:latest .
+docker push $IMAGE_F:latest
+kubectl -n topscorers rollout restart deploy/topscorers-frontend
+kubectl -n topscorers rollout status  deploy/topscorers-frontend
+
+
+IMAGE_B=ghcr.io/drokenhorisk/topscorers-backend
+GIT_SHA=$(git rev-parse --short HEAD)
+
+docker build --no-cache -t $IMAGE_B:$GIT_SHA -t $IMAGE_B:latest -f backend/Dockerfile .
+docker push $IMAGE_B:$GIT_SHA
+docker push $IMAGE_B:latest
