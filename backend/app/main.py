@@ -28,6 +28,10 @@ def api_dashboard():
         return FileResponse(str(OUTPUT_PATH), media_type="text/html")
     return PlainTextResponse("Dashboard not generated yet. POST /api/generate", status_code=404)
 
+@app.get("/api/health")
+def health():
+    return {"status": "ok", "last_dashboard_ts": "..."}
+
 # --------- Scheduler interne ----------
 _bg_task = None
 _stop = asyncio.Event()
