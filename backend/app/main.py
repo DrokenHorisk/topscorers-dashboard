@@ -12,7 +12,7 @@ app = FastAPI(title="TopScorers Backend")
 @app.get("/healthz")
 @app.get("/api/healthz")
 def healthz():
-    return {"ok": True}
+    return {"status": "ok", "last_dashboard_ts": "..."}
 
 @app.post("/api/generate")
 def api_generate():
