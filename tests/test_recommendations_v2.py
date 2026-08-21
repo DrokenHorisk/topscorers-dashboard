@@ -106,5 +106,22 @@ class RecommendationV2Tests(unittest.TestCase):
         self.assertTrue(strategy["Action"].isin(["GARDER", "ÉCOUTER OFFRES", "VENDRE", "REMPLACER"]).all())
 
 
+    def test_decision_colors_follow_v3_actions(self):
+        expected = {
+            "ACHETER": "decision-buy",
+            "ACHETER / REVENDRE": "decision-trade",
+            "ENCHÉRIR": "decision-bid",
+            "ATTENDRE": "decision-wait",
+            "ÉVITER": "decision-avoid",
+            "REMPLACER": "decision-replace",
+            "VENDRE": "decision-sell",
+            "ÉCOUTER OFFRES": "decision-listen",
+            "GARDER": "decision-keep",
+        }
+        for action, css_class in expected.items():
+            key = "Décision" if action in {"ACHETER", "ACHETER / REVENDRE", "ENCHÉRIR", "ATTENDRE", "ÉVITER"} else "Action"
+            self.assertEqual(dashboard._decision_row_class(pd.Series({key: action})), css_class)
+
+
 if __name__ == "__main__":
     unittest.main()
