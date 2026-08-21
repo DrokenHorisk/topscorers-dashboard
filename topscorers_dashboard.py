@@ -2383,6 +2383,32 @@ def main():
 """
     })
 
+    lineup_missing = 0
+    if df_lineup is not None and not df_lineup.empty and "Actuel" in df_lineup.columns:
+        current_slots = df_lineup["Actuel"].astype(str).str.strip().str.lower()
+        lineup_missing = int(current_slots.isin(["", "none", "nan", "null"]).sum())
+    lineup_penalty = lineup_missing * 50
+    lineup_state = (
+        "<div class='alert alert-success py-2 mb-3'>Composition complète : aucune pénalité de place vide détectée.</div>"
+        if lineup_missing == 0
+        else f"<div class='alert alert-danger py-2 mb-3'><b>{lineup_missing} place(s) vide(s)</b> : risque de -{lineup_penalty} points au prochain match.</div>"
+    )
+    sections.append({
+        "id": "tabLineup",
+        "title": "Compo",
+        "content": f"""
+<div class="row g-3 mb-3">
+  <div class="col-6"><div class="card p-3 h-100"><div class="small text-secondary">Places vides</div><div class="h3 m-0">{lineup_missing}</div></div></div>
+  <div class="col-6"><div class="card p-3 h-100"><div class="small text-secondary">Pénalité potentielle</div><div class="h3 m-0 text-danger">-{lineup_penalty}</div></div></div>
+</div>
+{lineup_state}
+<div class="card p-3">
+  <h2 class="h5 mb-1">Composition actuelle de Droken</h2>
+  <div class="small text-secondary mb-2">À vérifier avant le début du premier match : la composition devient ensuite verrouillée.</div>
+  {df_to_html_table(df_lineup, "tblLineup", "Chercher un joueur ou un slot…") if df_lineup is not None and not df_lineup.empty else "<div class='text-secondary'>Composition indisponible dans la réponse TopScorers.</div>"}
+</div>"""
+    })
+
     if not df_action_plan.empty:
         total_gain = float(_num_series(df_action_plan, "Gain pts/match").clip(lower=0).sum())
         total_profit = float(_num_series(df_action_plan, "Profit potentiel").fillna(0).sum())
@@ -2460,7 +2486,7 @@ def main():
 </div>"""
         })
     else:
-        sections.append({"id":"tabRecos","title":"Recommandations","content":"<div class='text-secondary'>Aucune recommandation.</div>"})
+        sections.append({"id":"tabRecos","title":"Achats","content":"<div class='text-secondary'>Aucune recommandation.</div>"})
 
     if not df_all_players_scored.empty:
         note = f"<div class='small text-secondary mb-2'>Équipes interrogées : {', '.join(map(str, team_ids))}. Détails joueur : {'ON' if ALL_PLAYERS_FETCH_DETAILS else 'OFF'}.</div>"
@@ -2474,7 +2500,7 @@ def main():
 </div>"""
         })
     else:
-        sections.append({"id":"tabAllPlayers","title":"Tous les joueurs","content":"<div class='text-secondary'>Aucun joueur récupéré (vérifie la liste d’IDs d’équipes).</div>"})
+        sections.append({"id":"tabAllPlayers","title":"Joueurs","content":"<div class='text-secondary'>Aucun joueur récupéré (vérifie la liste d’IDs d’équipes).</div>"})
 
     if df_team_by_owner is not None and not df_team_by_owner.empty:
         owners_list = sorted(set(df_team_by_owner["Propriétaire"].astype(str).str.strip()))
@@ -2555,25 +2581,124 @@ document.addEventListener('DOMContentLoaded', function () {
 """
         })
     else:
-        sections.append({"id":"tabOwners","title":"Équipe","content":"<div class='text-secondary'>Aucune équipe trouvée (vérifie TEAM_ID et OTHER_TEAM_IDS).</div>"})
+        sections.append({"id":"tabOwners","title":"Ligue","content":"<div class='text-secondary'>Aucune équipe trouvée (vérifie TEAM_ID et OTHER_TEAM_IDS).</div>"})
 
-    legend_html = """
-<div class="card p-3">
-  <h2 class="h5 mb-2">Aide & légende</h2>
-  <ul>
-    <li><b>MV 90 j</b> : moyenne sur 90 jours (ou historique disponible si &lt; 90 j).</li>
-    <li><b>MV min/max 365 j</b> : min/max sur 365 jours (ou historique disponible si &lt; 365 j).</li>
-    <li><b>Momentum 30 j (%)</b> : variation % sur 30 jours.</li>
-    <li><b>Décote vs max 365 (%)</b> : (MV max 365 – Prix) / MV max 365.</li>
-    <li><b>MV Spark</b> : mini-courbe basée sur l’historique récent (affichée même si peu de données).</li>
-    <li><b>AlphaScore</b> : indicateur d’opportunité marché.</li>
-    <li><b>Score équipe</b> : qualité sportive et gain par rapport au joueur réellement remplacé.</li>
-    <li><b>Score trading</b> : potentiel de plus-value selon le prix, la valeur juste et l’historique.</li>
-    <li><b>Confiance</b> : solidité des données disponibles (matchs, saisons et historique de valeur).</li>
-    <li><b>Enchère max</b> : plafond conseillé qui conserve une marge de sécurité adaptée à la confiance.</li>
-    <li><b>Score décision</b> : synthèse équilibrée équipe/trading/confiance utilisée par le plan d’action.</li>
-    <li><b>Points officiels</b> : la moyenne TopScorers intègre déjà les 42 actions (buts, assists, tirs, blocs, engagements, pénalités, temps de glace et statistiques gardien). Le Live affiche leur détail sans les recompter.</li>
+    legend_html = f"""
+<div class="row g-3 mb-3">
+  <div class="col-12 col-lg-7">
+    <div class="card p-4 h-100">
+      <div class="small text-uppercase text-secondary mb-1">Mode d’emploi</div>
+      <h2 class="h4 mb-2">Comment utiliser le dashboard</h2>
+      <p class="text-secondary mb-0">Commence par <b>Live</b> les soirs de match, <b>Compo</b> avant le coup d’envoi, puis <b>Maintenant</b> pour les décisions de marché. Les autres onglets servent à approfondir.</p>
+    </div>
+  </div>
+  <div class="col-12 col-lg-5">
+    <div class="card p-4 h-100">
+      <div class="small text-secondary">Configuration actuelle</div>
+      <div class="h5 mb-1">{LEAGUE_MANAGERS} managers · mode {RECO_MODE}</div>
+      <div class="small text-secondary">Dashboard complet toutes les 30 min · Live 30 s en match / 5 min hors match.</div>
+    </div>
+  </div>
+</div>
+
+<div class="card p-3 mb-3">
+  <h3 class="h5 mb-3">Les onglets</h3>
+  <div class="table-wrapper">
+    <table class="table table-sm align-middle mb-0">
+      <thead><tr><th>Onglet</th><th>À quoi il sert</th><th>Quand le consulter</th></tr></thead>
+      <tbody>
+        <tr><td><b>Live</b></td><td>Points de Droken, joueurs alignés, événements et matchs.</td><td>Pendant les rencontres.</td></tr>
+        <tr><td><b>Compo</b></td><td>Contrôle les slots et calcule la pénalité potentielle des places vides.</td><td>Avant le premier match.</td></tr>
+        <tr><td><b>Maintenant</b></td><td>Plan d’achats optimisé selon ton budget réel.</td><td>À chaque nouvelle vente.</td></tr>
+        <tr><td><b>Mon équipe</b></td><td>Décision garder, vendre, écouter ou remplacer pour chaque joueur.</td><td>Pour gérer l’effectif.</td></tr>
+        <tr><td><b>À vendre</b></td><td>Joueurs dont la vente ou le remplacement est prioritaire.</td><td>Quand tu dois libérer du budget.</td></tr>
+        <tr><td><b>Marché</b></td><td>Toutes les ventes et leurs données brutes.</td><td>Pour vérifier une opportunité.</td></tr>
+        <tr><td><b>Achats</b></td><td>Classement complet du moteur V3.</td><td>Pour comparer plusieurs cibles.</td></tr>
+        <tr><td><b>Joueurs</b></td><td>Base générale des joueurs analysés.</td><td>Pour le scouting.</td></tr>
+        <tr><td><b>Ligue</b></td><td>Effectifs des autres managers et filtres par club/propriétaire.</td><td>Pour anticiper la concurrence.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-12 col-xl-6">
+    <div class="card p-3 h-100">
+      <h3 class="h5">Comprendre une enchère</h3>
+      <ul class="mb-0">
+        <li><b>Prix</b> : montant actuellement affiché par TopScorers.</li>
+        <li><b>Offre conseillée</b> : montant réaliste pour gagner face aux {LEAGUE_MANAGERS - 1} autres managers.</li>
+        <li><b>Plafond absolu</b> : limite à ne pas dépasser, même en cas de surenchère.</li>
+        <li><b>Pression marché</b> : concurrence estimée selon la ligue, les offres et l’intérêt sportif.</li>
+        <li><b>Valeur estimée</b> : valeur juste calculée avec le marché actuel et l’historique.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="col-12 col-xl-6">
+    <div class="card p-3 h-100">
+      <h3 class="h5">Décisions sur l’effectif</h3>
+      <ul class="mb-0">
+        <li><b>GARDER</b> : aucun remplacement suffisamment rentable.</li>
+        <li><b>ÉCOUTER OFFRES</b> : vendre seulement si une offre généreuse arrive.</li>
+        <li><b>VENDRE</b> : rendement faible ou fenêtre de prix favorable.</li>
+        <li><b>REMPLACER</b> : une cible disponible apporte un gain sportif significatif.</li>
+        <li><b>Prix vente conseillé</b> : prix de départ laissant une marge de négociation.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-12 col-xl-6">
+    <div class="card p-3 h-100">
+      <h3 class="h5">Scores du moteur</h3>
+      <ul class="mb-0">
+        <li><b>Projection pts</b> : moyenne pondérée de la saison, N-1 et N-2.</li>
+        <li><b>Gain pts/match</b> : projection de la cible moins celle du joueur remplacé.</li>
+        <li><b>Score équipe</b> : intérêt sportif pour Droken.</li>
+        <li><b>Score trading</b> : potentiel de plus-value.</li>
+        <li><b>Confiance</b> : quantité et solidité des données disponibles.</li>
+        <li><b>Score décision</b> : synthèse utilisée pour le plan d’action.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="col-12 col-xl-6">
+    <div class="card p-3 h-100">
+      <h3 class="h5">Marché et historique</h3>
+      <ul class="mb-0">
+        <li><b>MV 90 j</b> : valeur moyenne récente.</li>
+        <li><b>MV min/max 365 j</b> : fourchette historique disponible.</li>
+        <li><b>Momentum 30 j</b> : direction récente de la valeur.</li>
+        <li><b>Décote</b> : différence entre le prix demandé et une référence de marché.</li>
+        <li><b>ROI potentiel</b> : plus-value théorique avant concurrence.</li>
+        <li><b>AlphaScore</b> : indicateur historique d’opportunité, secondaire face au Score décision.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="card p-3 mb-3">
+  <h3 class="h5">Live et calcul des points</h3>
+  <p>La moyenne officielle TopScorers intègre déjà les 42 événements : buts, assists, tirs, blocs, engagements, pénalités, temps de glace, résultats et statistiques des gardiens. Le dashboard utilise ce total pour éviter tout double comptage et affiche le détail disponible pour expliquer le score.</p>
+  <ul class="mb-0">
+    <li><b>EN DIRECT</b> : au moins un match ou joueur est signalé en cours.</li>
+    <li><b>HORS MATCH</b> : dernière information disponible, sans rencontre active.</li>
+    <li><b>MEMBER REQUIS</b> : TopScorers réserve la donnée demandée à l’abonnement.</li>
+    <li><b>INDISPONIBLE</b> : l’API ne répond pas ; le dernier cache valide est conservé.</li>
+    <li>Les valeurs « — » signifient que TopScorers ne fournit pas ce détail à cet instant, pas que le joueur a forcément zéro.</li>
   </ul>
+</div>
+
+<div class="card p-3">
+  <h3 class="h5">Bonnes pratiques pour gagner</h3>
+  <ol class="mb-0">
+    <li>Vérifie toujours <b>Compo</b> avant le premier match : chaque place vide coûte 50 points.</li>
+    <li>Place l’<b>offre conseillée</b> assez tôt en cas d’égalité, car la première offre identique est prioritaire.</li>
+    <li>Ne dépasse jamais le <b>plafond absolu</b> sous l’effet de la concurrence.</li>
+    <li>Privilégie le <b>gain pts/match</b> pour renforcer Droken et le ROI pour une opération de revente.</li>
+    <li>Garde une réserve de budget pour les opportunités suivantes et évite un solde négatif avant une journée.</li>
+    <li>Une faible confiance signifie « données insuffisantes », pas forcément « mauvais joueur ».</li>
+  </ol>
 </div>
 """
     sections.append({"id":"tabHelp","title":"Aide","content": legend_html})
