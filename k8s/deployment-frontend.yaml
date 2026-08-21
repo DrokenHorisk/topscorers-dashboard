@@ -1,4 +1,3 @@
-# k8s/deployment-frontend.yaml (ajouts marqués par ⬅)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,27 +6,24 @@ metadata:
 spec:
   replicas: 1
   selector:
-    matchLabels: { app: topscorers-frontend }
+    matchLabels:
+      app: topscorers-frontend
   template:
     metadata:
-      labels: { app: topscorers-frontend }
+      labels:
+        app: topscorers-frontend
     spec:
       containers:
         - name: web
-          image: ghcr.io/drokenhorisk/topscorers-frontend:latest
+          image: ghcr.io/drokenhorisk/topscorers-frontend:295daaea3091e60d3dec09ba0bdc2394451b90b6
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
           volumeMounts:
-            - name: data
-              mountPath: /usr/share/nginx/html
-            - name: nginx-conf                       # ⬅
-              mountPath: /etc/nginx/conf.d           # ⬅ (remplace tout le dossier conf.d)
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
       volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: topscorers-data
-        - name: nginx-conf                           # ⬅
+        - name: nginx-conf
           configMap:
             name: topscorers-frontend-nginx
             items:
