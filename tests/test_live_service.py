@@ -28,6 +28,14 @@ class LiveServiceTests(unittest.TestCase):
         self.assertEqual(row["stats"]["assists"], 1)
         self.assertEqual(row["stats"]["penalty_minutes"], 2)
 
+    def test_player_name_is_not_taken_from_nested_team(self):
+        roster_player = {"id": 42, "firstname": "Connor", "lastname": "Hughes", "position_name": "C"}
+        live_player = {"id": 42, "team": {"name": "SC Bern", "acronym": "SCB"}, "live_points": 12}
+        row = live_service._player_row({**roster_player, **live_player}, {"42"}, stats_source=True)
+        self.assertEqual(row["name"], "Connor Hughes")
+        self.assertEqual(row["team"], "SCB")
+        self.assertEqual(row["position"], "C")
+
     def test_official_scoring_contains_positive_and_discipline_events(self):
         scoring = live_service.OFFICIAL_SCORING
         self.assertEqual(scoring["goal_forward"], 60)
