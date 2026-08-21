@@ -66,5 +66,18 @@ class RecommendationV2Tests(unittest.TestCase):
         self.assertEqual(len(replacements), len(set(replacements)))
 
 
+    def test_position_normalization_accepts_missing_and_numeric_values(self):
+        self.assertEqual(dashboard.pos_family_label(float("nan")), "W")
+        self.assertEqual(dashboard.pos_family_label(12.0), "W")
+        self.assertEqual(dashboard.pos_family_label(None), "W")
+        self.assertEqual(dashboard.pos_family_label(" d "), "D")
+
+        roster = self.roster.copy()
+        roster.loc[0, "Poste"] = float("nan")
+        roster.loc[1, "Poste"] = 12.0
+        result = dashboard.compute_recommendations_v2(self.market, roster)
+        self.assertFalse(result.empty)
+
+
 if __name__ == "__main__":
     unittest.main()
