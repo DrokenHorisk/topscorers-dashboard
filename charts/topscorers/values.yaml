@@ -22,13 +22,12 @@ service:
 
 ingress:
   enabled: true
-  className: nginx
+  className: traefik
+  # Hôte vide = accepte l'URL publique générée par Tailscale Funnel (*.ts.net).
+  # /api est routé vers le backend, toutes les autres routes vers le frontend.
   hosts:
-    - host: tops.your-domain.tld
-      paths:
-        - path: /
-          pathType: Prefix
-  tls: []  # voir README pour activer TLS
+    - host: ""
+  tls: []
 
 backend:
   env:
@@ -41,7 +40,7 @@ backend:
     limits:   { cpu: 500m, memory: 800Mi }
 
 frontend:
-  apiBase: ""  # vide = même origine via Ingress
+  apiBase: ""  # même origine via l'Ingress
   resources:
     requests: { cpu: 50m, memory: 128Mi }
     limits:   { cpu: 200m, memory: 256Mi }
