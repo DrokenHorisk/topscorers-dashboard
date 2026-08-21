@@ -5,13 +5,30 @@ metadata:
   namespace: topscorers
 spec:
   schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
+      activeDeadlineSeconds: 1200
+      backoffLimit: 2
       template:
+        metadata:
+          labels:
+            app: topscorers-dashboard-generator
+            trigger: scheduled
         spec:
-          restartPolicy: OnFailure
+          restartPolicy: Never
           containers:
-            - name: runner
-              image: ghcr.io/drokenhorisk/topscorers-backend:latest
-              imagePullPolicy: Always
-              command: ["curl","-s","-X","POST","http://topscorers-backend:8080/api/generate"]
+            - name: generate
+              image: curlimages/curl:8.12.1
+              imagePullPolicy: IfNotPresent
+              command:
+                - curl
+                - --fail
+                - --show-error
+                - --max-time
+                - "900"
+                - --request
+                - POST
+                - http://topscorers-backend:8080/api/generate
