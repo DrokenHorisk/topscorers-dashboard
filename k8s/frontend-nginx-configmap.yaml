@@ -1,4 +1,3 @@
-# k8s/frontend-nginx-configmap.yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -11,18 +10,18 @@ data:
       server_name _;
 
       root /usr/share/nginx/html;
-      index dashboard_topscorers.html;
-
-      location / {
-        try_files $uri $uri/ /dashboard_topscorers.html;
-      }
-
-      # 🔁 Redirige /api/dashboard vers la racine du frontend
-      location = /api/dashboard {
-        return 302 /;
-      }
+      index index.html;
 
       location /api/ {
-        proxy_pass http://topscorers-backend:8080/api/;
+        proxy_pass http://topscorers-backend:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+      }
+
+      location / {
+        try_files $uri $uri/ /index.html;
       }
     }
