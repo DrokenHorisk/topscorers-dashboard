@@ -1,0 +1,33 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: topscorers-generate-after-sync
+  namespace: topscorers
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "10"
+spec:
+  activeDeadlineSeconds: 1200
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: topscorers-dashboard-generator
+        trigger: argocd-post-sync
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: generate
+          image: curlimages/curl:8.12.1
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -ec
+            - |
+              echo "Attente du backend TopScorers..."
+              until curl --fail --silent --show-error http://topscorers-backend:8080/healthz; do
+                sleep 5
+              done
+              echo "Génération du dashboard après synchronisation Argo CD..."
+              curl --fail --show-error --max-time 900 --request POST                 http://topscorers-backend:8080/api/generate
