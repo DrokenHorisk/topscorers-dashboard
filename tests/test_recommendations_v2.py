@@ -81,5 +81,30 @@ class RecommendationV2Tests(unittest.TestCase):
         self.assertFalse(result.empty)
 
 
+    def test_competitive_bid_accounts_for_nine_managers(self):
+        market = self.market.iloc[[0]].copy()
+        market.loc[market.index[0], "Prix"] = 273_356
+        market.loc[market.index[0], "Valeur marchée"] = 291_317
+        market.loc[market.index[0], "MV 90 j"] = 291_317
+        market.loc[market.index[0], "MV min 365 j"] = 285_000
+        market.loc[market.index[0], "MV max 365 j"] = 300_000
+        market.loc[market.index[0], "Offres (#)"] = 0
+        result = dashboard.compute_recommendations_v2(market, self.roster)
+        row = result.iloc[0]
+        self.assertGreaterEqual(row["Offre conseillée"], 285_000)
+        self.assertGreaterEqual(row["Plafond absolu"], row["Offre conseillée"])
+        self.assertGreater(row["Offre conseillée"], row["Prix"])
+
+    def test_roster_strategy_proposes_replacements_and_sale_prices(self):
+        recommendations = dashboard.compute_recommendations_v2(self.market, self.roster)
+        strategy = dashboard.compute_roster_strategy(self.roster, recommendations)
+        required = {
+            "Action", "Prix vente conseillé", "Remplaçant conseillé",
+            "Offre remplaçant", "Gain remplacement", "Pourquoi"
+        }
+        self.assertTrue(required.issubset(strategy.columns))
+        self.assertTrue(strategy["Action"].isin(["GARDER", "ÉCOUTER OFFRES", "VENDRE", "REMPLACER"]).all())
+
+
 if __name__ == "__main__":
     unittest.main()
