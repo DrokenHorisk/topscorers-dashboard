@@ -6,7 +6,7 @@ image:
   frontend:
     repository: ghcr.io/drokenhorisk/topscorers-frontend
     tag: latest
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
 
 replicaCount:
   backend: 1
