@@ -4,7 +4,9 @@ import asyncio
 import signal
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
+from starlette.concurrency import run_in_threadpool
 from .dashboard_runner import generate_dashboard, OUTPUT_PATH
+from .live_service import get_live_snapshot
 
 app = FastAPI(title="TopScorers Backend")
 
@@ -21,6 +23,11 @@ def api_generate():
         return {"ok": True, "file": path}
     except Exception as e:
         raise HTTPException(500, str(e))
+
+@app.get("/api/live")
+async def api_live():
+    # Les appels TopScorers sont bloquants : ils tournent hors de la boucle FastAPI.
+    return await run_in_threadpool(get_live_snapshot)
 
 @app.get("/api/dashboard")
 def api_dashboard():
