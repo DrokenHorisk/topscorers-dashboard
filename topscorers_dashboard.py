@@ -1784,13 +1784,27 @@ def fetch_team_meta(s, team_id: int):
     except Exception:
         return None, None, ""
 
-def pos_family_label(p: str) -> str:
-    if not p: return "W"
-    p = p.upper()
-    if p.startswith("G"): return "G"
-    if p.startswith("D"): return "D"
-    if p.startswith("C"): return "C"
-    if "W" in p or "AIL" in p: return "W"
+def pos_family_label(p: object) -> str:
+    """Normalise un poste TopScorers, y compris les valeurs absentes ou numériques."""
+    if p is None:
+        return "W"
+    try:
+        if pd.isna(p):
+            return "W"
+    except (TypeError, ValueError):
+        pass
+
+    value = str(p).strip().upper()
+    if not value or value in {"NAN", "NONE", "<NA>"}:
+        return "W"
+    if value.startswith("G"):
+        return "G"
+    if value.startswith("D"):
+        return "D"
+    if value.startswith("C"):
+        return "C"
+    if "W" in value or "AIL" in value:
+        return "W"
     return "W"
 
 def build_my_enriched_roster(s, my_team_id: str, team_games_map: dict, team_ptsavg_map: dict) -> pd.DataFrame:
