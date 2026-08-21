@@ -24,6 +24,8 @@ RECO_HISTORY_CSV = os.getenv("RECOMMENDATION_HISTORY_CSV", "/data/recommendation
 RECO_MAX_ACTIONS = int(os.getenv("RECO_MAX_ACTIONS", "5"))
 RECO_MIN_MARGIN = float(os.getenv("RECO_MIN_MARGIN", "0.10"))
 RECO_MODE = (os.getenv("RECO_MODE", "balanced") or "balanced").strip().lower()
+LEAGUE_MANAGERS = max(2, int(os.getenv("LEAGUE_MANAGERS", "9")))
+BID_INCREMENT = max(1, int(os.getenv("BID_INCREMENT", "1000")))
 
 # Poids AlphaScore
 ALPHA_W_VALUE   = float(os.getenv("ALPHA_W_VALUE",  "0.30"))
@@ -1675,10 +1677,39 @@ def compute_recommendations_v2(market: pd.DataFrame, roster: pd.DataFrame) -> pd
     combined = combined - 4.0 * pd.Series(net_foreign, index=out.index).clip(lower=0)
     out["Score décision"] = combined.clip(0, 100).round(1)
 
-    # Une forte confiance autorise une marge légèrement plus faible, jamais moins de 6 %.
+    # Une ligue à plusieurs managers exige une offre réaliste, distincte du plafond absolu.
     target_margin = (RECO_MIN_MARGIN + (100 - confidence) / 1000.0).clip(lower=0.06, upper=0.20)
     team_premium = ((_num_series(out, "Score équipe") / 100.0) * 0.05).clip(0, 0.05)
-    out["Enchère max"] = (fair * (1.0 - target_margin + team_premium)).round(-3)
+    offers = _num_series(out, "Offres (#)").fillna(0).clip(lower=0)
+    manager_pressure = min(1.0, max(0.0, (LEAGUE_MANAGERS - 1) / 8.0))
+    competition_pct = (
+        0.025
+        + 0.020 * manager_pressure
+        + 0.012 * offers.clip(upper=3)
+        + 0.010 * (_num_series(out, "Score équipe") >= 75).astype(float)
+    ).clip(upper=0.10)
+    out["Prime concurrence (%)"] = (competition_pct * 100).round(1)
+    out["Pression marché"] = pd.cut(
+        competition_pct,
+        bins=[-np.inf, 0.05, 0.075, np.inf],
+        labels=["Normale", "Forte", "Très forte"],
+    ).astype(str)
+
+    def _ceil_bid(value):
+        if pd.isna(value) or float(value) <= 0:
+            return 0.0
+        return float(np.ceil(float(value) / BID_INCREMENT) * BID_INCREMENT)
+
+    competitive_bid = (price * (1.0 + competition_pct)).map(_ceil_bid)
+    raw_ceiling = fair * (1.0 - target_margin + team_premium + competition_pct * 0.55)
+    absolute_ceiling = pd.concat([raw_ceiling, competitive_bid], axis=1).max(axis=1)
+    absolute_ceiling = pd.concat([absolute_ceiling, fair * 0.99], axis=1).min(axis=1).map(_ceil_bid)
+    advised_bid = pd.concat([competitive_bid, absolute_ceiling], axis=1).min(axis=1).map(_ceil_bid)
+
+    out["Offre conseillée"] = advised_bid
+    out["Plafond absolu"] = absolute_ceiling
+    # Alias conservé pour l'historique et les consommateurs existants.
+    out["Enchère max"] = out["Plafond absolu"]
 
     decisions, reasons = [], []
     for idx, row in out.iterrows():
@@ -1693,13 +1724,13 @@ def compute_recommendations_v2(market: pd.DataFrame, roster: pd.DataFrame) -> pd
         affordable = p > 0 and max_bid > 0 and p <= max_bid
         if affordable and gain_i >= 1.0 and team_i >= 62 and conf_i >= 45:
             decisions.append("ACHETER")
-            reasons.append(f"+{gain_i:.1f} pt/match vs {row.get('Remplace', 'effectif')}")
+            reasons.append(f"+{gain_i:.1f} pt/match vs {row.get('Remplace', 'effectif')} · offre {float(row.get('Offre conseillée') or p):,.0f}")
         elif affordable and roi_i >= 12 and trade_i >= 68 and conf_i >= 40:
             decisions.append("ACHETER / REVENDRE")
-            reasons.append(f"ROI estimé {roi_i:.0f}%")
+            reasons.append(f"ROI estimé {roi_i:.0f}% · offre {float(row.get('Offre conseillée') or p):,.0f}")
         elif affordable and decision_i >= 55:
             decisions.append("ENCHÉRIR")
-            reasons.append(f"jusqu'à {max_bid:,.0f}")
+            reasons.append(f"offre {float(row.get('Offre conseillée') or p):,.0f} · plafond {max_bid:,.0f}")
         elif max_bid > 0 and p > max_bid and (team_i >= 60 or trade_i >= 60):
             decisions.append("ATTENDRE")
             reasons.append(f"prix supérieur de {((p/max_bid)-1)*100:.0f}% au maximum conseillé")
@@ -1730,7 +1761,8 @@ def optimize_action_plan(recommendations: pd.DataFrame, budget: float, max_actio
     for size in range(1, min(max_actions, len(pool)) + 1):
         for combo in itertools.combinations(pool.index.tolist(), size):
             chosen = pool.loc[list(combo)]
-            cost = float(_num_series(chosen, "Prix").sum())
+            cost_col = "Offre conseillée" if "Offre conseillée" in chosen.columns else "Prix"
+            cost = float(_num_series(chosen, cost_col).sum())
             if cost > budget:
                 continue
             replacements = [x for x in chosen["Remplace"].astype(str).tolist() if x and x != "Place libre"]
@@ -2097,7 +2129,7 @@ def main():
         "Joueur","Poste","Équipe","Prix","Valeur marchée","Décote (%)","Pts / 100k","Pts moy.",
         "Matchs (équipe)","Matchs (saison)","Pts moy. (saison)","Team PtsAvg",
         "MV 90 j","MV min 365 j","MV max 365 j","Momentum 30 j (%)","Décote vs max 365 (%)","MV Spark",
-        "Vendeur","Expire dans (s)","AlphaScore"
+        "Vendeur","Offres (#)","Expire dans (s)","AlphaScore"
     ])
     df_sales_for_view = _round_metrics(df_sales_for_view)
 
@@ -2126,7 +2158,7 @@ def main():
     persist_recommendation_snapshot(df_action_plan)
 
     decision_columns = [
-        "Décision", "Joueur", "Poste", "Équipe", "Prix", "Enchère max", "Valeur estimée",
+        "Décision", "Joueur", "Poste", "Équipe", "Prix", "Offre conseillée", "Plafond absolu", "Pression marché", "Valeur estimée",
         "Profit potentiel", "ROI potentiel (%)", "Projection pts", "Remplace", "Gain pts/match",
         "Score équipe", "Score trading", "Confiance (%)", "Score décision", "Pourquoi",
         "Étranger", "Impact étranger", "Expire dans (s)", "AlphaScore"
