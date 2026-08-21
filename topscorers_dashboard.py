@@ -24,6 +24,8 @@ RECO_HISTORY_CSV = os.getenv("RECOMMENDATION_HISTORY_CSV", "/data/recommendation
 RECO_MAX_ACTIONS = int(os.getenv("RECO_MAX_ACTIONS", "5"))
 RECO_MIN_MARGIN = float(os.getenv("RECO_MIN_MARGIN", "0.10"))
 RECO_MODE = (os.getenv("RECO_MODE", "balanced") or "balanced").strip().lower()
+LEAGUE_MANAGERS = max(2, int(os.getenv("LEAGUE_MANAGERS", "9")))
+BID_INCREMENT = max(1, int(os.getenv("BID_INCREMENT", "1000")))
 
 # Poids AlphaScore
 ALPHA_W_VALUE   = float(os.getenv("ALPHA_W_VALUE",  "0.30"))
@@ -1675,10 +1677,39 @@ def compute_recommendations_v2(market: pd.DataFrame, roster: pd.DataFrame) -> pd
     combined = combined - 4.0 * pd.Series(net_foreign, index=out.index).clip(lower=0)
     out["Score décision"] = combined.clip(0, 100).round(1)
 
-    # Une forte confiance autorise une marge légèrement plus faible, jamais moins de 6 %.
+    # Une ligue à plusieurs managers exige une offre réaliste, distincte du plafond absolu.
     target_margin = (RECO_MIN_MARGIN + (100 - confidence) / 1000.0).clip(lower=0.06, upper=0.20)
     team_premium = ((_num_series(out, "Score équipe") / 100.0) * 0.05).clip(0, 0.05)
-    out["Enchère max"] = (fair * (1.0 - target_margin + team_premium)).round(-3)
+    offers = _num_series(out, "Offres (#)").fillna(0).clip(lower=0)
+    manager_pressure = min(1.0, max(0.0, (LEAGUE_MANAGERS - 1) / 8.0))
+    competition_pct = (
+        0.025
+        + 0.020 * manager_pressure
+        + 0.012 * offers.clip(upper=3)
+        + 0.010 * (_num_series(out, "Score équipe") >= 75).astype(float)
+    ).clip(upper=0.10)
+    out["Prime concurrence (%)"] = (competition_pct * 100).round(1)
+    out["Pression marché"] = pd.cut(
+        competition_pct,
+        bins=[-np.inf, 0.05, 0.075, np.inf],
+        labels=["Normale", "Forte", "Très forte"],
+    ).astype(str)
+
+    def _ceil_bid(value):
+        if pd.isna(value) or float(value) <= 0:
+            return 0.0
+        return float(np.ceil(float(value) / BID_INCREMENT) * BID_INCREMENT)
+
+    competitive_bid = (price * (1.0 + competition_pct)).map(_ceil_bid)
+    raw_ceiling = fair * (1.0 - target_margin + team_premium + competition_pct * 0.55)
+    absolute_ceiling = pd.concat([raw_ceiling, competitive_bid], axis=1).max(axis=1)
+    absolute_ceiling = pd.concat([absolute_ceiling, fair * 0.99], axis=1).min(axis=1).map(_ceil_bid)
+    advised_bid = pd.concat([competitive_bid, absolute_ceiling], axis=1).min(axis=1).map(_ceil_bid)
+
+    out["Offre conseillée"] = advised_bid
+    out["Plafond absolu"] = absolute_ceiling
+    # Alias conservé pour l'historique et les consommateurs existants.
+    out["Enchère max"] = out["Plafond absolu"]
 
     decisions, reasons = [], []
     for idx, row in out.iterrows():
@@ -1693,13 +1724,13 @@ def compute_recommendations_v2(market: pd.DataFrame, roster: pd.DataFrame) -> pd
         affordable = p > 0 and max_bid > 0 and p <= max_bid
         if affordable and gain_i >= 1.0 and team_i >= 62 and conf_i >= 45:
             decisions.append("ACHETER")
-            reasons.append(f"+{gain_i:.1f} pt/match vs {row.get('Remplace', 'effectif')}")
+            reasons.append(f"+{gain_i:.1f} pt/match vs {row.get('Remplace', 'effectif')} · offre {float(row.get('Offre conseillée') or p):,.0f}")
         elif affordable and roi_i >= 12 and trade_i >= 68 and conf_i >= 40:
             decisions.append("ACHETER / REVENDRE")
-            reasons.append(f"ROI estimé {roi_i:.0f}%")
+            reasons.append(f"ROI estimé {roi_i:.0f}% · offre {float(row.get('Offre conseillée') or p):,.0f}")
         elif affordable and decision_i >= 55:
             decisions.append("ENCHÉRIR")
-            reasons.append(f"jusqu'à {max_bid:,.0f}")
+            reasons.append(f"offre {float(row.get('Offre conseillée') or p):,.0f} · plafond {max_bid:,.0f}")
         elif max_bid > 0 and p > max_bid and (team_i >= 60 or trade_i >= 60):
             decisions.append("ATTENDRE")
             reasons.append(f"prix supérieur de {((p/max_bid)-1)*100:.0f}% au maximum conseillé")
@@ -1709,6 +1740,72 @@ def compute_recommendations_v2(market: pd.DataFrame, roster: pd.DataFrame) -> pd
     out["Décision"] = decisions
     out["Pourquoi"] = reasons
     return _round_metrics(out).sort_values(["Score décision", "Confiance (%)"], ascending=False)
+
+def compute_roster_strategy(roster: pd.DataFrame, recommendations: pd.DataFrame) -> pd.DataFrame:
+    """Transforme l'effectif de Droken en décisions garder/vendre/remplacer."""
+    if roster is None or roster.empty:
+        return pd.DataFrame()
+
+    out = roster.copy()
+    out["Projection pts"] = _projected_points(out)
+    fair_input = out.copy()
+    if "Valeur" in fair_input.columns and "Valeur marchée" not in fair_input.columns:
+        fair_input["Valeur marchée"] = fair_input["Valeur"]
+    out["Valeur estimée"] = _fair_value(fair_input)
+    out["Confiance (%)"] = _confidence_score(out)
+    projections = _num_series(out, "Projection pts")
+    low_cut = float(projections.quantile(0.30)) if not projections.dropna().empty else 0.0
+
+    actions, reasons, sell_prices = [], [], []
+    replacements, replacement_bids, gains = [], [], []
+    for _, row in out.iterrows():
+        name = str(row.get("Joueur", ""))
+        projection = float(row.get("Projection pts") or 0) if pd.notna(row.get("Projection pts")) else 0.0
+        value = float(row.get("Valeur") or 0) if pd.notna(row.get("Valeur")) else 0.0
+        fair_value = float(row.get("Valeur estimée") or value) if pd.notna(row.get("Valeur estimée")) else value
+        momentum = float(row.get("Momentum 30 j (%)") or 0) if pd.notna(row.get("Momentum 30 j (%)")) else 0.0
+
+        candidates = pd.DataFrame()
+        if recommendations is not None and not recommendations.empty and "Remplace" in recommendations.columns:
+            candidates = recommendations[recommendations["Remplace"].astype(str) == name].copy()
+            candidates = candidates[candidates["Décision"].isin(["ACHETER", "ACHETER / REVENDRE", "ENCHÉRIR"])]
+        if not candidates.empty:
+            candidate = candidates.sort_values(["Gain pts/match", "Score décision"], ascending=False).iloc[0]
+            candidate_gain = float(candidate.get("Gain pts/match") or 0)
+            replacement = str(candidate.get("Joueur", "—"))
+            replacement_bid = float(candidate.get("Offre conseillée") or candidate.get("Prix") or 0)
+        else:
+            candidate_gain, replacement, replacement_bid = 0.0, "—", 0.0
+
+        overpriced = value > 0 and fair_value > 0 and value >= fair_value * 1.10
+        weak = projection <= low_cut
+        if candidate_gain >= 1.0:
+            action = "REMPLACER"
+            reason = f"{replacement} apporte +{candidate_gain:.1f} pt/match"
+        elif weak and (overpriced or momentum < -5):
+            action = "VENDRE"
+            reason = "rendement faible et fenêtre de vente favorable"
+        elif overpriced or momentum < -8:
+            action = "ÉCOUTER OFFRES"
+            reason = "valeur actuelle généreuse ou dynamique en baisse"
+        else:
+            action = "GARDER"
+            reason = "aucun remplacement rentable identifié"
+
+        sale_base = max(value, fair_value)
+        sale_price = float(np.ceil((sale_base * (1.07 if action in ["VENDRE", "ÉCOUTER OFFRES"] else 1.12)) / BID_INCREMENT) * BID_INCREMENT) if sale_base > 0 else 0
+        actions.append(action); reasons.append(reason); sell_prices.append(sale_price)
+        replacements.append(replacement); replacement_bids.append(replacement_bid); gains.append(candidate_gain)
+
+    out["Action"] = actions
+    out["Pourquoi"] = reasons
+    out["Prix vente conseillé"] = sell_prices
+    out["Remplaçant conseillé"] = replacements
+    out["Offre remplaçant"] = replacement_bids
+    out["Gain remplacement"] = gains
+    priority = {"REMPLACER": 0, "VENDRE": 1, "ÉCOUTER OFFRES": 2, "GARDER": 3}
+    out["__priority"] = out["Action"].map(priority).fillna(9)
+    return _round_metrics(out).sort_values(["__priority", "Projection pts"], ascending=[True, True]).drop(columns=["__priority"])
 
 def optimize_action_plan(recommendations: pd.DataFrame, budget: float, max_actions: int = 5, foreign_capacity: int = 6):
     if recommendations is None or recommendations.empty:
@@ -1730,7 +1827,8 @@ def optimize_action_plan(recommendations: pd.DataFrame, budget: float, max_actio
     for size in range(1, min(max_actions, len(pool)) + 1):
         for combo in itertools.combinations(pool.index.tolist(), size):
             chosen = pool.loc[list(combo)]
-            cost = float(_num_series(chosen, "Prix").sum())
+            cost_col = "Offre conseillée" if "Offre conseillée" in chosen.columns else "Prix"
+            cost = float(_num_series(chosen, cost_col).sum())
             if cost > budget:
                 continue
             replacements = [x for x in chosen["Remplace"].astype(str).tolist() if x and x != "Place libre"]
@@ -2097,7 +2195,7 @@ def main():
         "Joueur","Poste","Équipe","Prix","Valeur marchée","Décote (%)","Pts / 100k","Pts moy.",
         "Matchs (équipe)","Matchs (saison)","Pts moy. (saison)","Team PtsAvg",
         "MV 90 j","MV min 365 j","MV max 365 j","Momentum 30 j (%)","Décote vs max 365 (%)","MV Spark",
-        "Vendeur","Expire dans (s)","AlphaScore"
+        "Vendeur","Offres (#)","Expire dans (s)","AlphaScore"
     ])
     df_sales_for_view = _round_metrics(df_sales_for_view)
 
@@ -2124,9 +2222,10 @@ def main():
     foreign_capacity = max(0, 6 - current_foreign)
     df_action_plan, total_cost = optimize_action_plan(df_reco, budget_available, RECO_MAX_ACTIONS, foreign_capacity)
     persist_recommendation_snapshot(df_action_plan)
+    df_roster_strategy = compute_roster_strategy(df_my_enriched.copy(), df_reco.copy())
 
     decision_columns = [
-        "Décision", "Joueur", "Poste", "Équipe", "Prix", "Enchère max", "Valeur estimée",
+        "Décision", "Joueur", "Poste", "Équipe", "Prix", "Offre conseillée", "Plafond absolu", "Pression marché", "Valeur estimée",
         "Profit potentiel", "ROI potentiel (%)", "Projection pts", "Remplace", "Gain pts/match",
         "Score équipe", "Score trading", "Confiance (%)", "Score décision", "Pourquoi",
         "Étranger", "Impact étranger", "Expire dans (s)", "AlphaScore"
@@ -2156,7 +2255,7 @@ def main():
   <div class="col-6 col-xl-3"><div class="card p-3 h-100"><div class="small text-secondary">Confiance moyenne</div><div class="h4 m-0">{avg_confidence:.0f}%</div></div></div>
 </div>"""
         sections.append({
-            "id":"tabActionPlan", "title":"Plan d’action",
+            "id":"tabActionPlan", "title":"Maintenant",
             "content": f"""
 {plan_summary}
 <div class="card p-3">
@@ -2173,8 +2272,35 @@ def main():
             "content":"<div class='card p-4'><h2 class='h5'>Aucune action immédiate</h2><div class='text-secondary'>Le moteur V2 ne trouve actuellement aucune opportunité suffisamment intéressante et abordable. Attendre est ici une décision volontaire.</div></div>"
         })
 
+    roster_columns = [
+        "Action", "Joueur", "Poste", "Projection pts", "Valeur", "Valeur estimée",
+        "Prix vente conseillé", "Remplaçant conseillé", "Offre remplaçant",
+        "Gain remplacement", "Confiance (%)", "Pourquoi"
+    ]
+    df_roster_view = reorder_columns(df_roster_strategy, roster_columns) if not df_roster_strategy.empty else pd.DataFrame()
+    df_sell_view = df_roster_view[df_roster_view["Action"].isin(["REMPLACER", "VENDRE", "ÉCOUTER OFFRES"])].copy() if not df_roster_view.empty else pd.DataFrame()
+
     sections.append({
-        "id":"tabVentes", "title":"Ventes",
+        "id":"tabMyTeam", "title":"Mon équipe",
+        "content": f"""
+<div class="card p-3">
+  <h2 class="h5 mb-1">Effectif de Droken</h2>
+  <div class="small text-secondary mb-2">Une décision simple par joueur : garder, écouter les offres, vendre ou remplacer.</div>
+  {df_to_html_table(df_roster_view, "tblMyTeam", "Chercher dans mon équipe…")}
+</div>"""
+    })
+    sections.append({
+        "id":"tabSell", "title":"À vendre",
+        "content": f"""
+<div class="card p-3">
+  <h2 class="h5 mb-1">Ventes et remplacements prioritaires</h2>
+  <div class="small text-secondary mb-2">Le prix conseillé laisse une marge de négociation adaptée à une ligue de {LEAGUE_MANAGERS} managers.</div>
+  {df_to_html_table(df_sell_view, "tblSell", "Filtrer les ventes…") if not df_sell_view.empty else "<div class='text-secondary'>Aucune vente urgente : ton effectif peut être conservé.</div>"}
+</div>"""
+    })
+
+    sections.append({
+        "id":"tabVentes", "title":"Marché",
         "content": f"""
 <div class="card p-3">
   <h2 class="h5 mb-2">Ventes du marché</h2>
@@ -2185,7 +2311,7 @@ def main():
 
     if not df_reco.empty:
         sections.append({
-            "id":"tabRecos", "title":"Recommandations",
+            "id":"tabRecos", "title":"Achats",
             "content": f"""
 <div class="card p-3">
   <h2 class="h5 mb-2">Toutes les recommandations V2</h2>
@@ -2199,7 +2325,7 @@ def main():
     if not df_all_players_scored.empty:
         note = f"<div class='small text-secondary mb-2'>Équipes interrogées : {', '.join(map(str, team_ids))}. Détails joueur : {'ON' if ALL_PLAYERS_FETCH_DETAILS else 'OFF'}.</div>"
         sections.append({
-            "id":"tabAllPlayers","title":"Tous les joueurs",
+            "id":"tabAllPlayers","title":"Joueurs",
             "content": f"""
 <div class="card p-3">
   <h2 class="h5 mb-2">Tous les joueurs (par équipes)</h2>
@@ -2218,7 +2344,7 @@ def main():
         team_opts  = "<option value='__ALL__' selected>Toutes</option>" + "".join(f"<option value='{t}'>{t}</option>" for t in teams_list)
 
         sections.append({
-            "id":"tabOwners","title":"Équipe",
+            "id":"tabOwners","title":"Ligue",
             "content": f"""
 <div class="card p-3">
   <h2 class="h5 mb-3">Équipes par propriétaire</h2>
