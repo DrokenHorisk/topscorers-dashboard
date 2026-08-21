@@ -12,6 +12,8 @@ spec:
     metadata:
       labels:
         app: topscorers-frontend
+      annotations:
+        topscorers/config-revision: "nginx-generation-timeout-v1"
     spec:
       containers:
         - name: web
