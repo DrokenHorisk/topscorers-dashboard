@@ -2243,6 +2243,123 @@ def main():
     # ---------- Sections ----------
     sections = []
 
+    sections.append({
+        "id": "tabLive",
+        "title": "Live",
+        "content": """
+<div id="liveRoot">
+  <div class="row g-3 mb-3">
+    <div class="col-12 col-md-4"><div class="card p-3 h-100"><div class="small text-secondary">État</div><div id="liveStatus" class="h5 m-0">Connexion…</div></div></div>
+    <div class="col-6 col-md-4"><div class="card p-3 h-100"><div class="small text-secondary">Points Droken</div><div id="livePoints" class="h3 m-0">—</div></div></div>
+    <div class="col-6 col-md-4"><div class="card p-3 h-100"><div class="small text-secondary">Rang live</div><div id="liveRank" class="h3 m-0">—</div></div></div>
+  </div>
+  <div id="liveMessage" class="alert alert-secondary py-2">Chargement des données TopScorers…</div>
+  <div class="card p-3 mb-3">
+    <div class="d-flex justify-content-between align-items-center gap-2 flex-wrap mb-2">
+      <div><h2 class="h5 mb-0">Joueurs de Droken</h2><div class="small text-secondary">Les points sont calculés par TopScorers à partir des 42 événements officiels.</div></div>
+      <button id="liveRefresh" class="btn btn-sm btn-outline-light" type="button">Actualiser</button>
+    </div>
+    <div class="table-wrapper">
+      <table class="table table-sm align-middle mb-0">
+        <thead><tr><th>Joueur</th><th>Équipe</th><th>État</th><th>Pts live</th><th>Buts</th><th>Assists</th><th>Tirs</th><th>Blocs</th><th>Pén.</th><th>Arrêts</th><th>+/-</th></tr></thead>
+        <tbody id="livePlayers"><tr><td colspan="11" class="text-secondary">Chargement…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card p-3">
+    <h2 class="h5 mb-2">Matchs</h2>
+    <div id="liveGames" class="text-secondary">Aucun match chargé.</div>
+  </div>
+  <div class="small text-secondary mt-2">Actualisation toutes les 30 s pendant les matchs, toutes les 5 min sinon. Le dernier résultat reste visible si l’API est indisponible.</div>
+</div>
+""",
+        "script": r"""
+<script>
+(() => {
+  const root = document.getElementById("liveRoot");
+  if (!root) return;
+  let timer = null;
+  let loading = false;
+  const esc = value => String(value ?? "—").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
+  const number = value => value === null || value === undefined ? "—" : Number(value).toLocaleString("fr-FR", {maximumFractionDigits:1});
+  const stat = (player, key) => number(player.stats && player.stats[key]);
+
+  function schedule(ms) {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => refresh(false), ms);
+  }
+
+  function render(data) {
+    const status = document.getElementById("liveStatus");
+    const points = document.getElementById("livePoints");
+    const rank = document.getElementById("liveRank");
+    const message = document.getElementById("liveMessage");
+    status.textContent = data.status === "LIVE" ? "● EN DIRECT" :
+      data.status === "MEMBER_REQUIRED" ? "MEMBER REQUIS" :
+      data.status === "ERROR" ? "INDISPONIBLE" : "HORS MATCH";
+    status.className = "h5 m-0 " + (data.status === "LIVE" ? "text-success" : data.status === "ERROR" ? "text-danger" : "");
+    points.textContent = number(data.live_points);
+    rank.textContent = data.rank ? "#" + esc(data.rank) : "—";
+    message.textContent = data.message || "";
+    message.className = "alert py-2 " + (data.status === "LIVE" ? "alert-success" : data.status === "ERROR" ? "alert-danger" : "alert-secondary");
+
+    const players = Array.isArray(data.players) ? data.players : [];
+    document.getElementById("livePlayers").innerHTML = players.length ? players.map(player => {
+      const state = player.playing ? "Sur la glace" : player.lined_up ? "Aligné" : "Banc";
+      return "<tr>" +
+        "<td><strong>" + esc(player.name) + "</strong><div class='small text-secondary'>" + esc(player.position) + "</div></td>" +
+        "<td>" + esc(player.team) + "</td><td>" + esc(state) + "</td>" +
+        "<td><strong>" + number(player.live_points) + "</strong></td>" +
+        "<td>" + stat(player,"goals") + "</td><td>" + stat(player,"assists") + "</td>" +
+        "<td>" + stat(player,"shots_on_goal") + "</td><td>" + stat(player,"blocked_shots") + "</td>" +
+        "<td>" + stat(player,"penalty_minutes") + "</td><td>" + stat(player,"saves") + "</td>" +
+        "<td>" + stat(player,"plus_minus") + "</td></tr>";
+    }).join("") : "<tr><td colspan='11' class='text-secondary'>Aucune donnée joueur disponible.</td></tr>";
+
+    const games = Array.isArray(data.games) ? data.games : [];
+    document.getElementById("liveGames").innerHTML = games.length ? games.map(game =>
+      "<div class='d-flex justify-content-between border-bottom py-2 gap-3'>" +
+      "<span>" + esc(game.home) + " — " + esc(game.away) + "</span>" +
+      "<strong>" + esc(game.home_score) + " : " + esc(game.away_score) + "</strong>" +
+      "<span class='small text-secondary'>" + esc(game.status) + "</span></div>"
+    ).join("") : "<span class='text-secondary'>Aucun match en cours ou programmé dans la réponse TopScorers.</span>";
+
+    const stamp = data.updated_at ? new Date(data.updated_at).toLocaleTimeString("fr-FR") : "—";
+    document.getElementById("liveRefresh").textContent = "Actualisé " + stamp;
+  }
+
+  async function refresh(force) {
+    const pane = document.getElementById("tabLive");
+    if (!force && (document.hidden || !pane || !pane.classList.contains("active"))) {
+      schedule(60000);
+      return;
+    }
+    if (loading) return;
+    loading = true;
+    try {
+      const response = await fetch("/api/live", {cache:"no-store"});
+      const data = await response.json();
+      render(data);
+      schedule(data.status === "LIVE" ? 30000 : 300000);
+    } catch (error) {
+      render({status:"ERROR", message:"Live inaccessible : " + error, players:[], games:[]});
+      schedule(60000);
+    } finally {
+      loading = false;
+    }
+  }
+
+  document.getElementById("liveRefresh").addEventListener("click", () => refresh(true));
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(true); });
+  document.querySelectorAll('[data-bs-toggle="tab"]').forEach(tab => tab.addEventListener("shown.bs.tab", event => {
+    if (event.target && event.target.getAttribute("data-bs-target") === "#tabLive") refresh(true);
+  }));
+  refresh(true);
+})();
+</script>
+"""
+    })
+
     if not df_action_plan.empty:
         total_gain = float(_num_series(df_action_plan, "Gain pts/match").clip(lower=0).sum())
         total_profit = float(_num_series(df_action_plan, "Profit potentiel").fillna(0).sum())
@@ -2432,6 +2549,7 @@ document.addEventListener('DOMContentLoaded', function () {
     <li><b>Confiance</b> : solidité des données disponibles (matchs, saisons et historique de valeur).</li>
     <li><b>Enchère max</b> : plafond conseillé qui conserve une marge de sécurité adaptée à la confiance.</li>
     <li><b>Score décision</b> : synthèse équilibrée équipe/trading/confiance utilisée par le plan d’action.</li>
+    <li><b>Points officiels</b> : la moyenne TopScorers intègre déjà les 42 actions (buts, assists, tirs, blocs, engagements, pénalités, temps de glace et statistiques gardien). Le Live affiche leur détail sans les recompter.</li>
   </ul>
 </div>
 """
