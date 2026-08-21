@@ -1741,6 +1741,72 @@ def compute_recommendations_v2(market: pd.DataFrame, roster: pd.DataFrame) -> pd
     out["Pourquoi"] = reasons
     return _round_metrics(out).sort_values(["Score décision", "Confiance (%)"], ascending=False)
 
+def compute_roster_strategy(roster: pd.DataFrame, recommendations: pd.DataFrame) -> pd.DataFrame:
+    """Transforme l'effectif de Droken en décisions garder/vendre/remplacer."""
+    if roster is None or roster.empty:
+        return pd.DataFrame()
+
+    out = roster.copy()
+    out["Projection pts"] = _projected_points(out)
+    fair_input = out.copy()
+    if "Valeur" in fair_input.columns and "Valeur marchée" not in fair_input.columns:
+        fair_input["Valeur marchée"] = fair_input["Valeur"]
+    out["Valeur estimée"] = _fair_value(fair_input)
+    out["Confiance (%)"] = _confidence_score(out)
+    projections = _num_series(out, "Projection pts")
+    low_cut = float(projections.quantile(0.30)) if not projections.dropna().empty else 0.0
+
+    actions, reasons, sell_prices = [], [], []
+    replacements, replacement_bids, gains = [], [], []
+    for _, row in out.iterrows():
+        name = str(row.get("Joueur", ""))
+        projection = float(row.get("Projection pts") or 0) if pd.notna(row.get("Projection pts")) else 0.0
+        value = float(row.get("Valeur") or 0) if pd.notna(row.get("Valeur")) else 0.0
+        fair_value = float(row.get("Valeur estimée") or value) if pd.notna(row.get("Valeur estimée")) else value
+        momentum = float(row.get("Momentum 30 j (%)") or 0) if pd.notna(row.get("Momentum 30 j (%)")) else 0.0
+
+        candidates = pd.DataFrame()
+        if recommendations is not None and not recommendations.empty and "Remplace" in recommendations.columns:
+            candidates = recommendations[recommendations["Remplace"].astype(str) == name].copy()
+            candidates = candidates[candidates["Décision"].isin(["ACHETER", "ACHETER / REVENDRE", "ENCHÉRIR"])]
+        if not candidates.empty:
+            candidate = candidates.sort_values(["Gain pts/match", "Score décision"], ascending=False).iloc[0]
+            candidate_gain = float(candidate.get("Gain pts/match") or 0)
+            replacement = str(candidate.get("Joueur", "—"))
+            replacement_bid = float(candidate.get("Offre conseillée") or candidate.get("Prix") or 0)
+        else:
+            candidate_gain, replacement, replacement_bid = 0.0, "—", 0.0
+
+        overpriced = value > 0 and fair_value > 0 and value >= fair_value * 1.10
+        weak = projection <= low_cut
+        if candidate_gain >= 1.0:
+            action = "REMPLACER"
+            reason = f"{replacement} apporte +{candidate_gain:.1f} pt/match"
+        elif weak and (overpriced or momentum < -5):
+            action = "VENDRE"
+            reason = "rendement faible et fenêtre de vente favorable"
+        elif overpriced or momentum < -8:
+            action = "ÉCOUTER OFFRES"
+            reason = "valeur actuelle généreuse ou dynamique en baisse"
+        else:
+            action = "GARDER"
+            reason = "aucun remplacement rentable identifié"
+
+        sale_base = max(value, fair_value)
+        sale_price = float(np.ceil((sale_base * (1.07 if action in ["VENDRE", "ÉCOUTER OFFRES"] else 1.12)) / BID_INCREMENT) * BID_INCREMENT) if sale_base > 0 else 0
+        actions.append(action); reasons.append(reason); sell_prices.append(sale_price)
+        replacements.append(replacement); replacement_bids.append(replacement_bid); gains.append(candidate_gain)
+
+    out["Action"] = actions
+    out["Pourquoi"] = reasons
+    out["Prix vente conseillé"] = sell_prices
+    out["Remplaçant conseillé"] = replacements
+    out["Offre remplaçant"] = replacement_bids
+    out["Gain remplacement"] = gains
+    priority = {"REMPLACER": 0, "VENDRE": 1, "ÉCOUTER OFFRES": 2, "GARDER": 3}
+    out["__priority"] = out["Action"].map(priority).fillna(9)
+    return _round_metrics(out).sort_values(["__priority", "Projection pts"], ascending=[True, True]).drop(columns=["__priority"])
+
 def optimize_action_plan(recommendations: pd.DataFrame, budget: float, max_actions: int = 5, foreign_capacity: int = 6):
     if recommendations is None or recommendations.empty:
         return pd.DataFrame(), 0
@@ -2156,6 +2222,7 @@ def main():
     foreign_capacity = max(0, 6 - current_foreign)
     df_action_plan, total_cost = optimize_action_plan(df_reco, budget_available, RECO_MAX_ACTIONS, foreign_capacity)
     persist_recommendation_snapshot(df_action_plan)
+    df_roster_strategy = compute_roster_strategy(df_my_enriched.copy(), df_reco.copy())
 
     decision_columns = [
         "Décision", "Joueur", "Poste", "Équipe", "Prix", "Offre conseillée", "Plafond absolu", "Pression marché", "Valeur estimée",
@@ -2188,7 +2255,7 @@ def main():
   <div class="col-6 col-xl-3"><div class="card p-3 h-100"><div class="small text-secondary">Confiance moyenne</div><div class="h4 m-0">{avg_confidence:.0f}%</div></div></div>
 </div>"""
         sections.append({
-            "id":"tabActionPlan", "title":"Plan d’action",
+            "id":"tabActionPlan", "title":"Maintenant",
             "content": f"""
 {plan_summary}
 <div class="card p-3">
@@ -2205,8 +2272,35 @@ def main():
             "content":"<div class='card p-4'><h2 class='h5'>Aucune action immédiate</h2><div class='text-secondary'>Le moteur V2 ne trouve actuellement aucune opportunité suffisamment intéressante et abordable. Attendre est ici une décision volontaire.</div></div>"
         })
 
+    roster_columns = [
+        "Action", "Joueur", "Poste", "Projection pts", "Valeur", "Valeur estimée",
+        "Prix vente conseillé", "Remplaçant conseillé", "Offre remplaçant",
+        "Gain remplacement", "Confiance (%)", "Pourquoi"
+    ]
+    df_roster_view = reorder_columns(df_roster_strategy, roster_columns) if not df_roster_strategy.empty else pd.DataFrame()
+    df_sell_view = df_roster_view[df_roster_view["Action"].isin(["REMPLACER", "VENDRE", "ÉCOUTER OFFRES"])].copy() if not df_roster_view.empty else pd.DataFrame()
+
     sections.append({
-        "id":"tabVentes", "title":"Ventes",
+        "id":"tabMyTeam", "title":"Mon équipe",
+        "content": f"""
+<div class="card p-3">
+  <h2 class="h5 mb-1">Effectif de Droken</h2>
+  <div class="small text-secondary mb-2">Une décision simple par joueur : garder, écouter les offres, vendre ou remplacer.</div>
+  {df_to_html_table(df_roster_view, "tblMyTeam", "Chercher dans mon équipe…")}
+</div>"""
+    })
+    sections.append({
+        "id":"tabSell", "title":"À vendre",
+        "content": f"""
+<div class="card p-3">
+  <h2 class="h5 mb-1">Ventes et remplacements prioritaires</h2>
+  <div class="small text-secondary mb-2">Le prix conseillé laisse une marge de négociation adaptée à une ligue de {LEAGUE_MANAGERS} managers.</div>
+  {df_to_html_table(df_sell_view, "tblSell", "Filtrer les ventes…") if not df_sell_view.empty else "<div class='text-secondary'>Aucune vente urgente : ton effectif peut être conservé.</div>"}
+</div>"""
+    })
+
+    sections.append({
+        "id":"tabVentes", "title":"Marché",
         "content": f"""
 <div class="card p-3">
   <h2 class="h5 mb-2">Ventes du marché</h2>
@@ -2217,7 +2311,7 @@ def main():
 
     if not df_reco.empty:
         sections.append({
-            "id":"tabRecos", "title":"Recommandations",
+            "id":"tabRecos", "title":"Achats",
             "content": f"""
 <div class="card p-3">
   <h2 class="h5 mb-2">Toutes les recommandations V2</h2>
@@ -2231,7 +2325,7 @@ def main():
     if not df_all_players_scored.empty:
         note = f"<div class='small text-secondary mb-2'>Équipes interrogées : {', '.join(map(str, team_ids))}. Détails joueur : {'ON' if ALL_PLAYERS_FETCH_DETAILS else 'OFF'}.</div>"
         sections.append({
-            "id":"tabAllPlayers","title":"Tous les joueurs",
+            "id":"tabAllPlayers","title":"Joueurs",
             "content": f"""
 <div class="card p-3">
   <h2 class="h5 mb-2">Tous les joueurs (par équipes)</h2>
@@ -2250,7 +2344,7 @@ def main():
         team_opts  = "<option value='__ALL__' selected>Toutes</option>" + "".join(f"<option value='{t}'>{t}</option>" for t in teams_list)
 
         sections.append({
-            "id":"tabOwners","title":"Équipe",
+            "id":"tabOwners","title":"Ligue",
             "content": f"""
 <div class="card p-3">
   <h2 class="h5 mb-3">Équipes par propriétaire</h2>
