@@ -153,13 +153,28 @@ def build_html_page(sections, must_buy_threshold: float):
   table a.pm-open {{ color: var(--lhc-text); text-decoration: none; font-weight: 500; }}
   table a.pm-open:hover {{ color: var(--lhc-red); text-decoration: underline; }}
 
-  .table .score-mustbuy td {{
-    background-color: #baf7d6 !important;
-    color: var(--lhc-black) !important;
-    font-weight: 600;
-    text-shadow: none;
-  }}
-  .table .score-mustbuy a.pm-open {{ color: var(--lhc-black) !important; text-decoration: underline; }}
+  .table tbody tr.decision-buy td      {{ background:rgba(25,195,125,.16) !important; }}
+  .table tbody tr.decision-trade td    {{ background:rgba(32,201,151,.11) !important; }}
+  .table tbody tr.decision-bid td      {{ background:rgba(13,110,253,.16) !important; }}
+  .table tbody tr.decision-wait td     {{ background:rgba(255,193,7,.15) !important; }}
+  .table tbody tr.decision-avoid td    {{ background:rgba(108,117,125,.10) !important; color:#aeb6c2 !important; }}
+  .table tbody tr.decision-replace td  {{ background:rgba(111,66,193,.20) !important; }}
+  .table tbody tr.decision-sell td     {{ background:rgba(220,53,69,.18) !important; }}
+  .table tbody tr.decision-listen td   {{ background:rgba(253,126,20,.16) !important; }}
+  .table tbody tr.decision-keep td     {{ background:rgba(25,135,84,.08) !important; }}
+  .table tbody tr[class*="decision-"] td:first-child {{ border-left:4px solid transparent; font-weight:700; }}
+  .table tbody tr.decision-buy td:first-child     {{ border-left-color:#19c37d; }}
+  .table tbody tr.decision-trade td:first-child   {{ border-left-color:#20c997; }}
+  .table tbody tr.decision-bid td:first-child     {{ border-left-color:#0d6efd; }}
+  .table tbody tr.decision-wait td:first-child    {{ border-left-color:#ffc107; }}
+  .table tbody tr.decision-avoid td:first-child   {{ border-left-color:#6c757d; }}
+  .table tbody tr.decision-replace td:first-child {{ border-left-color:#8b5cf6; }}
+  .table tbody tr.decision-sell td:first-child    {{ border-left-color:#dc3545; }}
+  .table tbody tr.decision-listen td:first-child  {{ border-left-color:#fd7e14; }}
+  .table tbody tr.decision-keep td:first-child    {{ border-left-color:#198754; }}
+  .decision-legend {{ display:flex; flex-wrap:wrap; gap:.5rem; }}
+  .decision-key {{ display:inline-flex; align-items:center; gap:.4rem; padding:.25rem .55rem; border:1px solid var(--row-border); border-radius:999px; }}
+  .decision-dot {{ width:.7rem; height:.7rem; border-radius:50%; display:inline-block; }}
 
   input.form-control-sm, select.form-select-sm {{
     background:#10141C; color:var(--lhc-text); border:1px solid var(--row-border);
@@ -501,35 +516,6 @@ document.addEventListener('DOMContentLoaded', function () {{
     return -1;
   }}
 
-  var mustBuyThreshold = {must_buy_threshold:.2f};
-
-  function colorizeMustBuy(tblId) {{
-    var tbl = document.getElementById(tblId);
-    if (!tbl) return;
-    function apply() {{
-      if (!tbl || !tbl.tBodies || !tbl.tBodies[0]) return;
-      var scoreIdx = findScoreColIndex(tbl);
-      if (scoreIdx < 0) return;
-      Array.prototype.slice.call(tbl.tBodies[0].rows).forEach(function(row){{
-        row.classList.remove('score-mustbuy');
-        var cell = row.cells[scoreIdx];
-        if (!cell) return;
-        var v = parseFloat((cell.innerText||'').replace(',', '.'));
-        if (!isNaN(v) && v >= mustBuyThreshold) row.classList.add('score-mustbuy');
-      }});
-    }}
-    if (tbl._pager) {{
-      var oldRebuild = tbl._pager.rebuild;
-      tbl._pager.rebuild = function() {{
-        oldRebuild.call(tbl._pager);
-        apply();
-      }};
-      tbl._pager.rebuild();
-    }} else {{
-      setTimeout(apply, 50);
-    }}
-  }}
-
   /* ===========================
      MODAL JOUEUR
   =========================== */
@@ -643,10 +629,6 @@ document.addEventListener('DOMContentLoaded', function () {{
     var tbl = document.getElementById(tableId);
     if (tbl) attachQuickFilter(input, tbl);
   }});
-
-  // Colorisation must-buy
-  ['tblVentes','tblRecos','tblAllPlayers','tblOwners','tblTradePlan','tblByPos','tblUnder','tblOver']
-    .forEach(colorizeMustBuy);
 
 }});
 
@@ -852,27 +834,46 @@ if (window.attachModalDelegate) {{ window.attachModalDelegate(tbl); }}
 </script>
 </body></html>"""
 
+def _decision_row_class(row: pd.Series) -> str:
+    raw = row.get("Décision", row.get("Action", ""))
+    value = str(raw).strip().upper()
+    mapping = {
+        "ACHETER": "decision-buy",
+        "ACHETER / REVENDRE": "decision-trade",
+        "ENCHÉRIR": "decision-bid",
+        "ATTENDRE": "decision-wait",
+        "ÉVITER": "decision-avoid",
+        "REMPLACER": "decision-replace",
+        "VENDRE": "decision-sell",
+        "À VENDRE": "decision-sell",
+        "ÉCOUTER OFFRES": "decision-listen",
+        "GARDER": "decision-keep",
+    }
+    return mapping.get(value, "")
+
+
 def df_to_html_table(df: pd.DataFrame, table_id: str, quick_placeholder="Filtrer…") -> str:
     if df is None or df.empty:
         return "<div class='text-secondary'>Aucune donnée à afficher.</div>"
     df2 = df.copy().where(pd.notna(df), "")
 
-    drop_cols = [c for c in df2.columns if c.strip().lower() in ("id","id joueur","player id","player_id")]
+    drop_cols = [col for col in df2.columns if col.strip().lower() in ("id", "id joueur", "player id", "player_id")]
     if drop_cols:
         df2 = df2.drop(columns=drop_cols)
 
     cols = list(df2.columns)
-    thead = "<thead><tr>" + "".join(f"<th>{c}</th>" for c in cols) + "</tr></thead>"
-
+    thead = "<thead><tr>" + "".join(f"<th>{col}</th>" for col in cols) + "</tr></thead>"
     rows_html = []
-    for _, r in df2.iterrows():
-        tds = []
-        for c in cols:
-            if c.lower().strip() == "mv spark":
-                tds.append(f"<td class='spark-cell'>{r[c]}</td>")
+    for _, row in df2.iterrows():
+        cells = []
+        for col in cols:
+            if col.lower().strip() == "mv spark":
+                cells.append(f"<td class='spark-cell'>{row[col]}</td>")
             else:
-                tds.append(f"<td>{r[c]}</td>")
-        rows_html.append("<tr>" + "".join(tds) + "</tr>")
+                cells.append(f"<td>{row[col]}</td>")
+        row_class = _decision_row_class(row)
+        class_attr = f" class='{row_class}'" if row_class else ""
+        rows_html.append(f"<tr{class_attr}>" + "".join(cells) + "</tr>")
 
     tbody = "<tbody>" + "".join(rows_html) + "</tbody>"
     quick = f"""
@@ -886,6 +887,7 @@ def df_to_html_table(df: pd.DataFrame, table_id: str, quick_placeholder="Filtrer
     {thead}{tbody}
   </table>
 </div>"""
+
 
 def kv_table(headers, rows) -> str:
     head = "<thead><tr>" + "".join(f"<th>{h}</th>" for h in headers) + "</tr></thead>"
@@ -2235,6 +2237,19 @@ def main():
     if not df_action_plan.empty:
         df_action_plan = reorder_columns(df_action_plan, decision_columns)
 
+    market_columns = [
+        "Décision", "Joueur", "Poste", "Équipe", "Prix", "Offre conseillée",
+        "Plafond absolu", "Pression marché", "Offres (#)", "Vendeur",
+        "Expire dans (s)", "Valeur estimée", "Pourquoi"
+    ]
+    buy_columns = [
+        "Décision", "Joueur", "Poste", "Équipe", "Offre conseillée",
+        "Plafond absolu", "Valeur estimée", "Gain pts/match", "Remplace",
+        "Score équipe", "Score trading", "Confiance (%)", "Score décision", "Pourquoi"
+    ]
+    df_market_view = df_reco[[col for col in market_columns if col in df_reco.columns]].copy() if not df_reco.empty else df_sales_for_view
+    df_buy_view = df_reco[[col for col in buy_columns if col in df_reco.columns]].copy() if not df_reco.empty else pd.DataFrame()
+
     # Équipe (par propriétaire)
     df_team_by_owner = build_owner_rosters(
         s, TEAM_ID, OTHER_TEAM_IDS_ENV, OTHER_TEAM_NAMES_ENV, team_games_map, team_ptsavg_map
@@ -2470,8 +2485,8 @@ def main():
         "content": f"""
 <div class="card p-3">
   <h2 class="h5 mb-2">Ventes du marché</h2>
-  <div class="small text-secondary mb-2">Lignes surlignées en <b>vert</b> = AlphaScore ≥ {dyn_threshold:.0f} (seuil dynamique).</div>
-  {df_to_html_table(df_sales_for_view, "tblVentes", "Filtrer les ventes…")}
+  <div class="small text-secondary mb-2">Les couleurs représentent désormais la décision V3, jamais l’ancien AlphaScore.</div>
+  {df_to_html_table(df_market_view, "tblVentes", "Filtrer les ventes…")}
 </div>"""
     })
 
@@ -2482,7 +2497,7 @@ def main():
 <div class="card p-3">
   <h2 class="h5 mb-2">Toutes les recommandations V2</h2>
   <div class="small text-secondary mb-2">Chaque vente reçoit une décision, une enchère maximale, un gain sportif, un potentiel trading et un niveau de confiance.</div>
-  {df_to_html_table(df_reco, "tblRecos", "Filtrer les recos…")}
+  {df_to_html_table(df_buy_view, "tblRecos", "Filtrer les recos…")}
 </div>"""
         })
     else:
@@ -2687,6 +2702,22 @@ document.addEventListener('DOMContentLoaded', function () {
     <li><b>INDISPONIBLE</b> : l’API ne répond pas ; le dernier cache valide est conservé.</li>
     <li>Les valeurs « — » signifient que TopScorers ne fournit pas ce détail à cet instant, pas que le joueur a forcément zéro.</li>
   </ul>
+</div>
+
+<div class="card p-3 mb-3">
+  <h3 class="h5">Couleurs des décisions</h3>
+  <p class="text-secondary">Les couleurs sont identiques dans Maintenant, Mon équipe, À vendre, Marché et Achats. Elles décrivent une action, pas simplement un bon score statistique.</p>
+  <div class="decision-legend">
+    <span class="decision-key"><i class="decision-dot" style="background:#19c37d"></i><b>ACHETER</b> — renfort prioritaire</span>
+    <span class="decision-key"><i class="decision-dot" style="background:#20c997"></i><b>ACHETER / REVENDRE</b> — opération trading</span>
+    <span class="decision-key"><i class="decision-dot" style="background:#0d6efd"></i><b>ENCHÉRIR</b> — intéressant sous le plafond</span>
+    <span class="decision-key"><i class="decision-dot" style="background:#ffc107"></i><b>ATTENDRE</b> — bon profil, prix trop élevé</span>
+    <span class="decision-key"><i class="decision-dot" style="background:#6c757d"></i><b>ÉVITER</b> — gain ou confiance insuffisant</span>
+    <span class="decision-key"><i class="decision-dot" style="background:#8b5cf6"></i><b>REMPLACER</b> — acheter la cible avant de vendre</span>
+    <span class="decision-key"><i class="decision-dot" style="background:#dc3545"></i><b>VENDRE</b> — sortie recommandée</span>
+    <span class="decision-key"><i class="decision-dot" style="background:#fd7e14"></i><b>ÉCOUTER OFFRES</b> — vendre seulement au bon prix</span>
+    <span class="decision-key"><i class="decision-dot" style="background:#198754"></i><b>GARDER</b> — aucune meilleure option rentable</span>
+  </div>
 </div>
 
 <div class="card p-3">
