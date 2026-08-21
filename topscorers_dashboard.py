@@ -2284,6 +2284,29 @@ def main():
   const number = value => value === null || value === undefined ? "—" : Number(value).toLocaleString("fr-FR", {maximumFractionDigits:1});
   const stat = (player, key) => number(player.stats && player.stats[key]);
 
+  function liveApiUrl() {
+    const origins = [];
+    try {
+      if (window.parent && window.parent !== window && /^https?:$/.test(window.parent.location.protocol)) {
+        origins.push(window.parent.location.origin);
+      }
+    } catch (_) {}
+    try {
+      if (window.top && window.top !== window && /^https?:$/.test(window.top.location.protocol)) {
+        origins.push(window.top.location.origin);
+      }
+    } catch (_) {}
+    try {
+      if (document.referrer) origins.push(new URL(document.referrer).origin);
+    } catch (_) {}
+    try {
+      if (/^https?:$/.test(window.location.protocol)) origins.push(window.location.origin);
+    } catch (_) {}
+    const origin = origins.find(value => value && value !== "null");
+    if (!origin) throw new Error("origine publique introuvable");
+    return new URL("/api/live", origin).href;
+  }
+
   function schedule(ms) {
     window.clearTimeout(timer);
     timer = window.setTimeout(() => refresh(false), ms);
@@ -2337,7 +2360,7 @@ def main():
     if (loading) return;
     loading = true;
     try {
-      const response = await fetch("/api/live", {cache:"no-store"});
+      const response = await fetch(liveApiUrl(), {cache:"no-store", credentials:"same-origin"});
       const data = await response.json();
       render(data);
       schedule(data.status === "LIVE" ? 30000 : 300000);
