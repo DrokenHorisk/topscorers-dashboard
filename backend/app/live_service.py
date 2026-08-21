@@ -46,6 +46,19 @@ def _data(payload: Any) -> Any:
     return payload
 
 
+def _direct_pick(obj: Any, keys, default=None):
+    if not isinstance(obj, dict):
+        return default
+    lowered = {str(k).lower(): v for k, v in obj.items()}
+    for key in keys:
+        if key in obj and obj[key] is not None:
+            return obj[key]
+        value = lowered.get(str(key).lower())
+        if value is not None:
+            return value
+    return default
+
+
 def _pick(obj: Any, keys, default=None):
     if not isinstance(obj, dict):
         return default
@@ -112,11 +125,11 @@ def _player_row(player, active_ids, stats_source=False):
         return None
     nested_player = player.get("player") if isinstance(player.get("player"), dict) else {}
     merged = {**nested_player, **player}
-    pid = _pick(merged, ("id", "player_id"))
-    first = str(_pick(merged, ("firstname", "first_name"), "") or "")
-    last = str(_pick(merged, ("lastname", "last_name"), "") or "")
-    name = str(_pick(merged, ("name", "player_name"), "") or "").strip() or f"{first} {last}".strip()
-    team = _pick(merged, ("team",), {})
+    pid = _direct_pick(merged, ("id", "player_id"))
+    first = str(_direct_pick(merged, ("firstname", "first_name"), "") or "")
+    last = str(_direct_pick(merged, ("lastname", "last_name"), "") or "")
+    name = str(_direct_pick(merged, ("name", "player_name"), "") or "").strip() or f"{first} {last}".strip()
+    team = _direct_pick(merged, ("team",), {})
     if isinstance(team, dict):
         team = team.get("acronym") or team.get("name")
     live_stats = _pick(merged, ("live_stats", "statistics", "stats"), {})
@@ -139,7 +152,7 @@ def _player_row(player, active_ids, stats_source=False):
     return {
         "id": pid,
         "name": name or f"Joueur {pid}",
-        "position": _pick(merged, ("position_name", "position")),
+        "position": _direct_pick(merged, ("position_name", "position")),
         "team": team,
         "lined_up": str(pid) in active_ids if pid is not None else bool(_pick(merged, ("lined_up", "is_lined_up"), False)),
         "playing": bool(_pick(merged, ("is_playing", "playing", "live"), False)),
@@ -178,11 +191,13 @@ def _fetch_uncached():
     try:
         session = _get_session()
         team_payload = _request_json(session, f"/api/user/teams/{dashboard.TEAM_ID}")
+        roster_payload = _request_json(session, f"/api/user/teams/{dashboard.TEAM_ID}/players")
         stats_payload = _request_json(session, f"/api/user/teams/{dashboard.TEAM_ID}/stats")
     except PermissionError:
         _session = None
         session = _get_session()
         team_payload = _request_json(session, f"/api/user/teams/{dashboard.TEAM_ID}")
+        roster_payload = _request_json(session, f"/api/user/teams/{dashboard.TEAM_ID}/players")
         stats_payload = _request_json(session, f"/api/user/teams/{dashboard.TEAM_ID}/stats")
 
     team_data = _data(team_payload) if team_payload else {}
@@ -190,8 +205,25 @@ def _fetch_uncached():
     active_ids = _active_player_ids(team_data)
 
     stats_players = _as_list(stats_data, ("players", "lineup", "live_players", "player_stats"))
+    roster_data = _data(roster_payload) if roster_payload else []
+    roster_players = roster_data if isinstance(roster_data, list) else _as_list(roster_data, ("players",))
     team_players = _as_list(team_data, ("players",))
-    source = stats_players or team_players
+    roster_players = roster_players or team_players
+
+    def player_id(item):
+        if not isinstance(item, dict):
+            return None
+        nested = item.get("player") if isinstance(item.get("player"), dict) else {}
+        return _direct_pick(item, ("id", "player_id"), _direct_pick(nested, ("id", "player_id")))
+
+    roster_by_id = {str(player_id(p)): p for p in roster_players if player_id(p) is not None}
+    if stats_players:
+        source = []
+        for live_player in stats_players:
+            base_player = roster_by_id.get(str(player_id(live_player)), {})
+            source.append({**base_player, **live_player})
+    else:
+        source = roster_players
     players = [row for row in (_player_row(p, active_ids, bool(stats_players)) for p in source) if row]
     players.sort(key=lambda p: (not p["lined_up"], -(p["live_points"] or 0), p["name"]))
 
