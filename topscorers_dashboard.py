@@ -1,5 +1,5 @@
 # topscorers_dashboard.py
-import os, sys, time, json
+import os, sys, time, json, itertools
 import datetime as dt
 from urllib.parse import unquote
 
@@ -20,6 +20,10 @@ TEAM_ID        = (os.getenv("TOPS_TEAM_ID") or "506387").strip()
 TEAM_QUERY     = (os.getenv("TOPS_TEAM_QUERY") or "").strip()
 RECO_BUDGET    = int(os.getenv("RECO_BUDGET", "10000000"))
 OUTPUT_HTML    = os.getenv("DASHBOARD_HTML", "dashboard_topscorers.html")
+RECO_HISTORY_CSV = os.getenv("RECOMMENDATION_HISTORY_CSV", "/data/recommendation_history.csv")
+RECO_MAX_ACTIONS = int(os.getenv("RECO_MAX_ACTIONS", "5"))
+RECO_MIN_MARGIN = float(os.getenv("RECO_MIN_MARGIN", "0.10"))
+RECO_MODE = (os.getenv("RECO_MODE", "balanced") or "balanced").strip().lower()
 
 # Poids AlphaScore
 ALPHA_W_VALUE   = float(os.getenv("ALPHA_W_VALUE",  "0.30"))
@@ -1427,9 +1431,11 @@ def fetch_market_enriched(s):
 
     if "MV_SPARK_HTML" in df_disp.columns:
         df_disp["MV Spark"] = df_disp["MV_SPARK_HTML"].fillna("").astype(str)
+    if "player.is_foreigner" in df_disp.columns:
+        df_disp["player.is_foreigner"] = df_disp["player.is_foreigner"].fillna(False).astype(bool).map(lambda x: "Étranger" if x else "")
 
     nice = {
-        "player.name":"Joueur","player.position_name":"Poste","team.acronym":"Équipe",
+        "player.name":"Joueur","player.position_name":"Poste","team.acronym":"Équipe","player.is_foreigner":"Étranger",
         "price":"Prix","player.marketvalue":"Valeur marchée","discount_pct":"Décote (%)","ratio_pts_per_100k":"Pts / 100k",
         "player.points_avg":"Pts moy.","username":"Vendeur","expires_in":"Expire dans (s)",
         "MV_90": "MV 90 j", "MV_MAX_365":"MV max 365 j", "MV_MIN_365":"MV min 365 j", "MV_MOMENTUM_30":"Momentum 30 j (%)",
@@ -1437,9 +1443,9 @@ def fetch_market_enriched(s):
     }
 
     keep_cols = [c for c in [
-        "player.name","player.position_name","team.acronym",
+        "player.name","player.position_name","team.acronym","player.is_foreigner",
         "price","player.marketvalue","discount_pct","ratio_pts_per_100k","player.points_avg",
-        "Matchs (équipe)","Matchs (saison)","Pts moy. (saison)","Team PtsAvg",
+        "Matchs (équipe)","Matchs (saison)","Pts moy. (saison)","Matchs N-1","Pts moy. N-1","Matchs N-2","Pts moy. N-2","Team PtsAvg",
         "MV_90","MV_MIN_365","MV_MAX_365","MV_MOMENTUM_30","discount_vs_max365_pct","MV Spark",
         "username","expires_in"
     ] if c in df_disp.columns]
@@ -1535,6 +1541,232 @@ def pick_recommendations(df, budget, foreign_slots, needs_by_pos):
 
     sel = work.loc[take_idx].drop(columns=["__dens"]) if take_idx else pd.DataFrame()
     return sel, spent
+
+# ----------------- RECOMMENDATION ENGINE V2 -----------------
+def _projected_points(df: pd.DataFrame) -> pd.Series:
+    """Projection conservative qui privilégie la saison courante sans ignorer l'historique."""
+    cur = _num_series(df, "Pts moy. (saison)").fillna(_num_series(df, "Pts moy."))
+    n1 = _num_series(df, "Pts moy. N-1")
+    n2 = _num_series(df, "Pts moy. N-2")
+    projected = []
+    for a, b, c in zip(cur, n1, n2):
+        blended = blended_form(a, b, c)
+        projected.append(blended if blended is not None else (float(a) if pd.notna(a) else np.nan))
+    return pd.Series(projected, index=df.index, dtype="float64")
+
+def _fair_value(df: pd.DataFrame) -> pd.Series:
+    """Valeur juste robuste à partir du marché courant et de l'historique disponible."""
+    current = _num_series(df, "Valeur marchée")
+    mv90 = _num_series(df, "MV 90 j")
+    mvmin = _num_series(df, "MV min 365 j")
+    mvmax = _num_series(df, "MV max 365 j")
+    out = []
+    for idx in df.index:
+        refs = []
+        if pd.notna(current.loc[idx]) and current.loc[idx] > 0:
+            refs.append((float(current.loc[idx]), 0.50))
+        if pd.notna(mv90.loc[idx]) and mv90.loc[idx] > 0:
+            refs.append((float(mv90.loc[idx]), 0.35))
+        if pd.notna(mvmin.loc[idx]) and pd.notna(mvmax.loc[idx]) and mvmax.loc[idx] > 0:
+            refs.append(((float(mvmin.loc[idx]) + float(mvmax.loc[idx])) / 2.0, 0.15))
+        if refs:
+            weight = sum(w for _, w in refs)
+            out.append(sum(v * w for v, w in refs) / weight)
+        else:
+            out.append(np.nan)
+    return pd.Series(out, index=df.index, dtype="float64")
+
+def _confidence_score(df: pd.DataFrame) -> pd.Series:
+    games = _num_series(df, "Matchs (saison)").fillna(0).clip(lower=0)
+    game_evidence = (games / 20.0).clip(upper=1.0)
+    season_evidence = (
+        _num_series(df, "Pts moy. (saison)").notna().astype(float)
+        + _num_series(df, "Pts moy. N-1").notna().astype(float)
+        + _num_series(df, "Pts moy. N-2").notna().astype(float)
+    ) / 3.0
+    history_evidence = (
+        _num_series(df, "MV 90 j").notna().astype(float)
+        + _num_series(df, "MV min 365 j").notna().astype(float)
+        + _num_series(df, "MV max 365 j").notna().astype(float)
+    ) / 3.0
+    return ((0.45 * game_evidence + 0.25 * season_evidence + 0.30 * history_evidence) * 100).clip(0, 100)
+
+def _replacement_index(roster: pd.DataFrame, family: str):
+    if roster is None or roster.empty or "Poste" not in roster.columns:
+        return None
+    families = roster["Poste"].astype(str).map(pos_family_label)
+    compatible = roster.loc[families == family]
+    if compatible.empty:
+        return None
+    projected = _projected_points(compatible)
+    if projected.dropna().empty:
+        return compatible.index[0]
+    return projected.fillna(float("inf")).idxmin()
+
+def compute_recommendations_v2(market: pd.DataFrame, roster: pd.DataFrame) -> pd.DataFrame:
+    if market is None or market.empty:
+        return pd.DataFrame()
+    out = market.copy()
+    out["Projection pts"] = _projected_points(out)
+    out["Valeur estimée"] = _fair_value(out)
+    out["Confiance (%)"] = _confidence_score(out)
+
+    price = _num_series(out, "Prix").fillna(0)
+    fair = _num_series(out, "Valeur estimée")
+    out["Profit potentiel"] = (fair - price).round(0)
+    out["ROI potentiel (%)"] = (_safe_div(fair - price, price) * 100).round(1)
+
+    replacement_names, replacement_points, replacement_foreign = [], [], []
+    for idx, row in out.iterrows():
+        family = pos_family_label(str(row.get("Poste", "")))
+        ridx = _replacement_index(roster, family)
+        if ridx is None:
+            replacement_names.append("Place libre")
+            replacement_points.append(0.0)
+            replacement_foreign.append(False)
+            continue
+        rrow = roster.loc[ridx]
+        rproj = _projected_points(roster.loc[[ridx]]).iloc[0]
+        replacement_names.append(str(rrow.get("Joueur", "—")))
+        replacement_points.append(float(rproj) if pd.notna(rproj) else 0.0)
+        replacement_foreign.append("étranger" in str(rrow.get("Étranger", "")).lower())
+
+    out["Remplace"] = replacement_names
+    out["Pts remplacé"] = replacement_points
+    out["Gain pts/match"] = (_num_series(out, "Projection pts") - _num_series(out, "Pts remplacé")).round(2)
+
+    projection = _num_series(out, "Projection pts")
+    gain = _num_series(out, "Gain pts/match")
+    usage = _safe_div(_num_series(out, "Matchs (saison)"), _num_series(out, "Matchs (équipe)"))
+    team_context = _num_series(out, "Team PtsAvg")
+    score_team = (
+        0.40 * _norm_rank(projection)
+        + 0.40 * _norm_rank(gain)
+        + 0.10 * _norm_rank(usage)
+        + 0.10 * _norm_rank(team_context)
+    ) * 100
+
+    roi = _num_series(out, "ROI potentiel (%)")
+    discount = _num_series(out, "Décote (%)")
+    momentum = _num_series(out, "Momentum 30 j (%)")
+    history_discount = _num_series(out, "Décote vs max 365 (%)")
+    score_trading = (
+        0.45 * _norm_rank(roi)
+        + 0.25 * _norm_rank(discount)
+        + 0.20 * _norm_rank(history_discount)
+        + 0.10 * _norm_rank(momentum)
+    ) * 100
+
+    out["Score équipe"] = score_team.round(1)
+    out["Score trading"] = score_trading.round(1)
+    confidence = _num_series(out, "Confiance (%)")
+    if RECO_MODE == "team":
+        combined = 0.68 * score_team + 0.20 * score_trading + 0.12 * confidence
+    elif RECO_MODE == "trading":
+        combined = 0.25 * score_team + 0.63 * score_trading + 0.12 * confidence
+    else:
+        combined = 0.50 * score_team + 0.38 * score_trading + 0.12 * confidence
+
+    is_foreigner = out["Étranger"].astype(str).str.contains("Étranger", case=False) if "Étranger" in out.columns else pd.Series(False, index=out.index)
+    net_foreign = []
+    for candidate_foreign, replaced_foreign in zip(is_foreigner.tolist(), replacement_foreign):
+        net_foreign.append(int(bool(candidate_foreign)) - int(bool(replaced_foreign)))
+    out["Impact étranger"] = net_foreign
+    combined = combined - 4.0 * pd.Series(net_foreign, index=out.index).clip(lower=0)
+    out["Score décision"] = combined.clip(0, 100).round(1)
+
+    # Une forte confiance autorise une marge légèrement plus faible, jamais moins de 6 %.
+    target_margin = (RECO_MIN_MARGIN + (100 - confidence) / 1000.0).clip(lower=0.06, upper=0.20)
+    team_premium = ((_num_series(out, "Score équipe") / 100.0) * 0.05).clip(0, 0.05)
+    out["Enchère max"] = (fair * (1.0 - target_margin + team_premium)).round(-3)
+
+    decisions, reasons = [], []
+    for idx, row in out.iterrows():
+        p = float(row.get("Prix") or 0)
+        max_bid = float(row.get("Enchère max") or 0) if pd.notna(row.get("Enchère max")) else 0
+        gain_i = float(row.get("Gain pts/match") or 0)
+        roi_i = float(row.get("ROI potentiel (%)") or 0) if pd.notna(row.get("ROI potentiel (%)")) else 0
+        team_i = float(row.get("Score équipe") or 0)
+        trade_i = float(row.get("Score trading") or 0)
+        conf_i = float(row.get("Confiance (%)") or 0)
+        decision_i = float(row.get("Score décision") or 0)
+        affordable = p > 0 and max_bid > 0 and p <= max_bid
+        if affordable and gain_i >= 1.0 and team_i >= 62 and conf_i >= 45:
+            decisions.append("ACHETER")
+            reasons.append(f"+{gain_i:.1f} pt/match vs {row.get('Remplace', 'effectif')}")
+        elif affordable and roi_i >= 12 and trade_i >= 68 and conf_i >= 40:
+            decisions.append("ACHETER / REVENDRE")
+            reasons.append(f"ROI estimé {roi_i:.0f}%")
+        elif affordable and decision_i >= 55:
+            decisions.append("ENCHÉRIR")
+            reasons.append(f"jusqu'à {max_bid:,.0f}")
+        elif max_bid > 0 and p > max_bid and (team_i >= 60 or trade_i >= 60):
+            decisions.append("ATTENDRE")
+            reasons.append(f"prix supérieur de {((p/max_bid)-1)*100:.0f}% au maximum conseillé")
+        else:
+            decisions.append("ÉVITER")
+            reasons.append("gain ou confiance insuffisant")
+    out["Décision"] = decisions
+    out["Pourquoi"] = reasons
+    return _round_metrics(out).sort_values(["Score décision", "Confiance (%)"], ascending=False)
+
+def optimize_action_plan(recommendations: pd.DataFrame, budget: float, max_actions: int = 5, foreign_capacity: int = 6):
+    if recommendations is None or recommendations.empty:
+        return pd.DataFrame(), 0
+    eligible = recommendations[
+        recommendations["Décision"].isin(["ACHETER", "ACHETER / REVENDRE", "ENCHÉRIR"])
+    ].copy()
+    eligible = eligible[_num_series(eligible, "Prix").fillna(0) > 0]
+    if eligible.empty:
+        return eligible, 0
+
+    eligible["__utility"] = (
+        _num_series(eligible, "Score décision")
+        + _num_series(eligible, "Gain pts/match").clip(lower=0) * 8
+        + _num_series(eligible, "ROI potentiel (%)").clip(lower=0, upper=50) * 0.25
+    )
+    pool = eligible.sort_values("__utility", ascending=False).head(18)
+    best_indices, best_utility, best_cost = (), -1.0, 0.0
+    for size in range(1, min(max_actions, len(pool)) + 1):
+        for combo in itertools.combinations(pool.index.tolist(), size):
+            chosen = pool.loc[list(combo)]
+            cost = float(_num_series(chosen, "Prix").sum())
+            if cost > budget:
+                continue
+            replacements = [x for x in chosen["Remplace"].astype(str).tolist() if x and x != "Place libre"]
+            if len(replacements) != len(set(replacements)):
+                continue
+            if _num_series(chosen, "Impact étranger").clip(lower=0).sum() > foreign_capacity:
+                continue
+            utility = float(_num_series(chosen, "__utility").sum())
+            if utility > best_utility or (utility == best_utility and cost < best_cost):
+                best_indices, best_utility, best_cost = combo, utility, cost
+    if not best_indices:
+        return pd.DataFrame(), 0
+    selected = pool.loc[list(best_indices)].sort_values("Score décision", ascending=False).drop(columns=["__utility"])
+    return _round_metrics(selected), int(best_cost)
+
+def persist_recommendation_snapshot(plan: pd.DataFrame):
+    if plan is None or plan.empty or not RECO_HISTORY_CSV:
+        return
+    try:
+        snapshot = plan.copy()
+        snapshot.insert(0, "Horodatage", dt.datetime.now().isoformat(timespec="seconds"))
+        keep = [c for c in [
+            "Horodatage", "Joueur", "Poste", "Prix", "Valeur estimée", "Enchère max",
+            "Profit potentiel", "ROI potentiel (%)", "Gain pts/match", "Remplace",
+            "Score équipe", "Score trading", "Confiance (%)", "Score décision", "Décision"
+        ] if c in snapshot.columns]
+        path = os.path.abspath(RECO_HISTORY_CSV)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.exists(path):
+            previous = pd.read_csv(path)
+            snapshot = pd.concat([previous, snapshot[keep]], ignore_index=True).tail(10000)
+        else:
+            snapshot = snapshot[keep]
+        snapshot.to_csv(path, index=False)
+    except Exception as exc:
+        print(f"[recommendations-v2] historique non écrit: {exc}")
 
 # ----------------- OWNER / ROSTER ENRICHED -----------------
 def fetch_team_meta(s, team_id: int):
@@ -1820,6 +2052,16 @@ def main():
     # Rankings
     team_games_map, _, team_ptsavg_map = fetch_rankings_maps(s)
 
+    # Effectif enrichi utilisé par le moteur V2 pour calculer le vrai gain de remplacement.
+    df_my_enriched = build_my_enriched_roster(s, TEAM_ID or "506387", team_games_map, team_ptsavg_map)
+    df_my_enriched = reorder_columns(df_my_enriched, [
+        "Joueur","Poste","Équipe","Étranger",
+        "Points","Pts moy.","Valeur","Pts / 100k",
+        "Matchs (équipe)","Matchs (saison)","Pts moy. (saison)","Team PtsAvg",
+        "Matchs N-1","Pts moy. N-1","Matchs N-2","Pts moy. N-2",
+        "MV 90 j","MV min 365 j","MV max 365 j","Momentum 30 j (%)","AlphaScore"
+    ])
+
     # Tous les joueurs
     team_ids = _parse_team_ids_env(ALL_PLAYERS_TEAMS_ENV, DEFAULT_TEAMS)
     df_all_players = fetch_all_players_by_teams(
@@ -1861,34 +2103,24 @@ def main():
     else:
         dyn_threshold = max(45.0, float(MUST_BUY_THRESHOLD_FALLBACK))
 
-    # Recos (internes)
-    needs = {"C":4, "W":8, "D":7, "G":2}
-    if df_sales_for_view is not None and not df_sales_for_view.empty:
-        df_sales_for_reco = compute_decision_score(df_sales_for_view.copy())
-        df_reco, total_cost = pick_recommendations(df_sales_for_reco, RECO_BUDGET, 6, needs)
-    else:
-        df_reco, total_cost = pd.DataFrame(), 0
+    # Recommandations V2 : budget réel, remplacement dans l'effectif, trading et confiance.
+    budget_available = int(budget_live) if budget_live is not None and float(budget_live) > 0 else RECO_BUDGET
+    df_reco = compute_recommendations_v2(df_sales_for_view.copy(), df_my_enriched.copy()) if not df_sales_for_view.empty else pd.DataFrame()
+    current_foreign = int(df_my_enriched["Étranger"].astype(str).str.contains("Étranger", case=False).sum()) if "Étranger" in df_my_enriched.columns else 0
+    foreign_capacity = max(0, 6 - current_foreign)
+    df_action_plan, total_cost = optimize_action_plan(df_reco, budget_available, RECO_MAX_ACTIONS, foreign_capacity)
+    persist_recommendation_snapshot(df_action_plan)
 
+    decision_columns = [
+        "Décision", "Joueur", "Poste", "Équipe", "Prix", "Enchère max", "Valeur estimée",
+        "Profit potentiel", "ROI potentiel (%)", "Projection pts", "Remplace", "Gain pts/match",
+        "Score équipe", "Score trading", "Confiance (%)", "Score décision", "Pourquoi",
+        "Étranger", "Impact étranger", "Expire dans (s)", "AlphaScore"
+    ]
     if not df_reco.empty:
-        drop_score_cols = [c for c in df_reco.columns if c.lower().startswith("score ")] + ["__ScoreDecision"]
-        df_reco = df_reco.drop(columns=[c for c in drop_score_cols if c in df_reco.columns])
-        df_reco = reorder_columns(df_reco, [
-            "Joueur","Poste","Équipe","Prix","Valeur marchée","Décote (%)","Pts / 100k","Pts moy.",
-            "Matchs (équipe)","Matchs (saison)","Pts moy. (saison)","Team PtsAvg",
-            "MV 90 j","MV min 365 j","MV max 365 j","Momentum 30 j (%)","Décote vs max 365 (%)","MV Spark",
-            "Vendeur","Expire dans (s)","AlphaScore"
-        ])
-        df_reco = _round_metrics(df_reco)
-
-    # Mon effectif enrichi
-    df_my_enriched = build_my_enriched_roster(s, TEAM_ID or "506387", team_games_map, team_ptsavg_map)
-    df_my_enriched = reorder_columns(df_my_enriched, [
-        "Joueur","Poste","Équipe","Étranger",
-        "Points","Pts moy.","Valeur","Pts / 100k",
-        "Matchs (équipe)","Matchs (saison)","Pts moy. (saison)","Team PtsAvg",
-        "Matchs N-1","Pts moy. N-1","Matchs N-2","Pts moy. N-2",
-        "MV 90 j","MV min 365 j","MV max 365 j","Momentum 30 j (%)","AlphaScore"
-    ])
+        df_reco = reorder_columns(df_reco, decision_columns)
+    if not df_action_plan.empty:
+        df_action_plan = reorder_columns(df_action_plan, decision_columns)
 
     # Équipe (par propriétaire)
     df_team_by_owner = build_owner_rosters(
@@ -1897,6 +2129,35 @@ def main():
 
     # ---------- Sections ----------
     sections = []
+
+    if not df_action_plan.empty:
+        total_gain = float(_num_series(df_action_plan, "Gain pts/match").clip(lower=0).sum())
+        total_profit = float(_num_series(df_action_plan, "Profit potentiel").fillna(0).sum())
+        avg_confidence = float(_num_series(df_action_plan, "Confiance (%)").fillna(0).mean())
+        plan_summary = f"""
+<div class="row g-3 mb-3">
+  <div class="col-6 col-xl-3"><div class="card p-3 h-100"><div class="small text-secondary">Budget disponible</div><div class="h4 m-0">{budget_available:,.0f}</div></div></div>
+  <div class="col-6 col-xl-3"><div class="card p-3 h-100"><div class="small text-secondary">Coût du plan</div><div class="h4 m-0">{total_cost:,.0f}</div></div></div>
+  <div class="col-6 col-xl-3"><div class="card p-3 h-100"><div class="small text-secondary">Gain estimé</div><div class="h4 m-0 text-success">+{total_gain:.1f} pts/match</div></div></div>
+  <div class="col-6 col-xl-3"><div class="card p-3 h-100"><div class="small text-secondary">Confiance moyenne</div><div class="h4 m-0">{avg_confidence:.0f}%</div></div></div>
+</div>"""
+        sections.append({
+            "id":"tabActionPlan", "title":"Plan d’action",
+            "content": f"""
+{plan_summary}
+<div class="card p-3">
+  <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap mb-2">
+    <div><h2 class="h5 mb-1">Les décisions à prendre maintenant</h2><div class="small text-secondary">Mode {RECO_MODE} · combinaison optimisée sous le budget réel · maximum {RECO_MAX_ACTIONS} actions.</div></div>
+    <span class="badge rounded-pill text-bg-success">V2 active</span>
+  </div>
+  {df_to_html_table(df_action_plan, "tblActionPlan", "Filtrer le plan d’action…")}
+</div>"""
+        })
+    else:
+        sections.append({
+            "id":"tabActionPlan", "title":"Plan d’action",
+            "content":"<div class='card p-4'><h2 class='h5'>Aucune action immédiate</h2><div class='text-secondary'>Le moteur V2 ne trouve actuellement aucune opportunité suffisamment intéressante et abordable. Attendre est ici une décision volontaire.</div></div>"
+        })
 
     sections.append({
         "id":"tabVentes", "title":"Ventes",
@@ -1913,8 +2174,8 @@ def main():
             "id":"tabRecos", "title":"Recommandations",
             "content": f"""
 <div class="card p-3">
-  <h2 class="h5 mb-2">Sélection recommandée <span class="text-secondary">(budget: {RECO_BUDGET:,} | total: {total_cost:,})</span></h2>
-  <div class="small text-secondary mb-2">Colonnes “Score …” masquées comme demandé. AlphaScore reste visible.</div>
+  <h2 class="h5 mb-2">Toutes les recommandations V2</h2>
+  <div class="small text-secondary mb-2">Chaque vente reçoit une décision, une enchère maximale, un gain sportif, un potentiel trading et un niveau de confiance.</div>
   {df_to_html_table(df_reco, "tblRecos", "Filtrer les recos…")}
 </div>"""
         })
@@ -2026,6 +2287,11 @@ document.addEventListener('DOMContentLoaded', function () {
     <li><b>Décote vs max 365 (%)</b> : (MV max 365 – Prix) / MV max 365.</li>
     <li><b>MV Spark</b> : mini-courbe basée sur l’historique récent (affichée même si peu de données).</li>
     <li><b>AlphaScore</b> : indicateur d’opportunité marché.</li>
+    <li><b>Score équipe</b> : qualité sportive et gain par rapport au joueur réellement remplacé.</li>
+    <li><b>Score trading</b> : potentiel de plus-value selon le prix, la valeur juste et l’historique.</li>
+    <li><b>Confiance</b> : solidité des données disponibles (matchs, saisons et historique de valeur).</li>
+    <li><b>Enchère max</b> : plafond conseillé qui conserve une marge de sécurité adaptée à la confiance.</li>
+    <li><b>Score décision</b> : synthèse équilibrée équipe/trading/confiance utilisée par le plan d’action.</li>
   </ul>
 </div>
 """
