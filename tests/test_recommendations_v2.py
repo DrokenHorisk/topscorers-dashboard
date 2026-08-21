@@ -73,6 +73,8 @@ class RecommendationV2Tests(unittest.TestCase):
         self.assertEqual(dashboard.pos_family_label(" d "), "D")
 
         roster = self.roster.copy()
+        # Les réponses API réelles peuvent contenir plusieurs types dans cette colonne.
+        roster["Poste"] = roster["Poste"].astype(object)
         roster.loc[0, "Poste"] = float("nan")
         roster.loc[1, "Poste"] = 12.0
         result = dashboard.compute_recommendations_v2(self.market, roster)
