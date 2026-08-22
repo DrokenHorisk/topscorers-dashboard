@@ -100,6 +100,13 @@ class RecommendationV2Tests(unittest.TestCase):
         self.assertEqual(dashboard._extract_position_label({"player": {"position_id": 2}}), 2)
         self.assertEqual(dashboard.pos_family_label(dashboard._extract_position_label({"position_id": 1})), "G")
 
+    def test_position_display_labels_are_human_readable(self):
+        self.assertEqual(dashboard.position_display_label(1), "Gardien")
+        self.assertEqual(dashboard.position_display_label(2), "Défenseur")
+        self.assertEqual(dashboard.position_display_label(3), "Attaquant")
+        self.assertEqual(dashboard.position_display_label(4), "Attaquant")
+        self.assertEqual(dashboard.position_display_label(None), "Poste inconnu")
+
     def test_goalie_never_replaces_a_defender(self):
         market = self.market.iloc[[0]].copy()
         market.loc[market.index[0], "Joueur"] = "Harri Säteri"
