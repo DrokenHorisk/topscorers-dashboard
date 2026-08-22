@@ -152,8 +152,12 @@ def _player_row(player, active_ids, stats_source=False):
     return {
         "id": pid,
         "name": name or f"Joueur {pid}",
-        "position": _direct_pick(merged, ("position_name", "position")),
+        "position": dashboard.position_display_label(
+            _direct_pick(merged, ("position_id", "position_name", "position"))
+        ),
         "team": team,
+        "marketvalue": _as_number(_pick(merged, ("marketvalue", "market_value"))),
+        "points_avg": _as_number(_pick(merged, ("points_avg", "average_points"))),
         "lined_up": str(pid) in active_ids if pid is not None else bool(_pick(merged, ("lined_up", "is_lined_up"), False)),
         "playing": bool(_pick(merged, ("is_playing", "playing", "live"), False)),
         "live_points": live_points,
