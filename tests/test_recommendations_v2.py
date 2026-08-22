@@ -52,7 +52,7 @@ class RecommendationV2Tests(unittest.TestCase):
         }
         self.assertTrue(required.issubset(result.columns))
         centre = result[result["Joueur"] == "Centre star"].iloc[0]
-        self.assertEqual(centre["Remplace"], "Centre faible")
+        self.assertEqual(centre["Remplace"], "Ailier faible")
         self.assertGreater(centre["Gain pts/match"], 3.0)
         self.assertGreater(centre["Valeur estimée"], centre["Prix"])
         self.assertLessEqual(centre["Enchère max"], centre["Valeur estimée"])
@@ -67,10 +67,18 @@ class RecommendationV2Tests(unittest.TestCase):
 
 
     def test_position_normalization_accepts_missing_and_numeric_values(self):
-        self.assertEqual(dashboard.pos_family_label(float("nan")), "W")
-        self.assertEqual(dashboard.pos_family_label(12.0), "W")
-        self.assertEqual(dashboard.pos_family_label(None), "W")
+        self.assertEqual(dashboard.pos_family_label(float("nan")), "?")
+        self.assertEqual(dashboard.pos_family_label(12.0), "?")
+        self.assertEqual(dashboard.pos_family_label(None), "?")
         self.assertEqual(dashboard.pos_family_label(" d "), "D")
+        self.assertEqual(dashboard.pos_family_label("Gardien"), "G")
+        self.assertEqual(dashboard.pos_family_label("Goalkeeper"), "G")
+        self.assertEqual(dashboard.pos_family_label("Torhüter"), "G")
+        self.assertEqual(dashboard.pos_family_label("Défenseur"), "D")
+        self.assertEqual(dashboard.pos_family_label("Verteidiger"), "D")
+        self.assertEqual(dashboard.pos_family_label("Centre"), "F")
+        self.assertEqual(dashboard.pos_family_label("Ailier"), "F")
+        self.assertEqual(dashboard.pos_family_label("Stürmer"), "F")
 
         roster = self.roster.copy()
         # Les réponses API réelles peuvent contenir plusieurs types dans cette colonne.
@@ -80,6 +88,26 @@ class RecommendationV2Tests(unittest.TestCase):
         result = dashboard.compute_recommendations_v2(self.market, roster)
         self.assertFalse(result.empty)
 
+
+
+    def test_goalie_never_replaces_a_defender(self):
+        market = self.market.iloc[[0]].copy()
+        market.loc[market.index[0], "Joueur"] = "Harri Säteri"
+        market.loc[market.index[0], "Poste"] = "Gardien"
+        result = dashboard.compute_recommendations_v2(market, self.roster)
+        row = result.iloc[0]
+        self.assertEqual(row["Famille poste"], "G")
+        self.assertEqual(row["Remplace"], "Gardien faible")
+        self.assertNotEqual(row["Remplace"], "Défenseur faible")
+
+    def test_unknown_position_is_never_recommended(self):
+        market = self.market.iloc[[0]].copy()
+        market["Poste"] = pd.Series([float("nan")], index=market.index, dtype=object)
+        result = dashboard.compute_recommendations_v2(market, self.roster)
+        row = result.iloc[0]
+        self.assertEqual(row["Famille poste"], "?")
+        self.assertEqual(row["Remplace"], "Poste inconnu")
+        self.assertEqual(row["Décision"], "ÉVITER")
 
     def test_competitive_bid_accounts_for_nine_managers(self):
         market = self.market.iloc[[0]].copy()
