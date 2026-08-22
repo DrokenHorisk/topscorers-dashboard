@@ -69,6 +69,10 @@ class RecommendationV2Tests(unittest.TestCase):
     def test_position_normalization_accepts_missing_and_numeric_values(self):
         self.assertEqual(dashboard.pos_family_label(float("nan")), "?")
         self.assertEqual(dashboard.pos_family_label(12.0), "?")
+        self.assertEqual(dashboard.pos_family_label(1), "G")
+        self.assertEqual(dashboard.pos_family_label(2.0), "D")
+        self.assertEqual(dashboard.pos_family_label(3), "F")
+        self.assertEqual(dashboard.pos_family_label(4.0), "F")
         self.assertEqual(dashboard.pos_family_label(None), "?")
         self.assertEqual(dashboard.pos_family_label(" d "), "D")
         self.assertEqual(dashboard.pos_family_label("Gardien"), "G")
@@ -89,6 +93,12 @@ class RecommendationV2Tests(unittest.TestCase):
         self.assertFalse(result.empty)
 
 
+
+
+    def test_position_id_from_api_payload_is_extracted(self):
+        self.assertEqual(dashboard._extract_position_label({"position_id": 1}), 1)
+        self.assertEqual(dashboard._extract_position_label({"player": {"position_id": 2}}), 2)
+        self.assertEqual(dashboard.pos_family_label(dashboard._extract_position_label({"position_id": 1})), "G")
 
     def test_goalie_never_replaces_a_defender(self):
         market = self.market.iloc[[0]].copy()

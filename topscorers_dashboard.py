@@ -1429,7 +1429,7 @@ def fetch_market_enriched(s):
     # L'API varie selon les endpoints: on privilégie un libellé textuel et le détail joueur.
     position_candidates = [
         "player.position_name", "player.position.name", "player.position.label",
-        "player.position.code", "player.position", "player.role", "POSITION_DETAIL",
+        "player.position.code", "player.position", "player.role", "player.position_id", "POSITION_DETAIL",
     ]
     resolved_position = pd.Series(index=base.index, dtype=object)
     for column in position_candidates:
@@ -1936,7 +1936,7 @@ def _extract_position_label(payload: object) -> object:
     if not isinstance(data, dict):
         return None
 
-    for key in ("position_name", "position_code", "position_label", "role"):
+    for key in ("position_name", "position_code", "position_label", "role", "position_id"):
         value = data.get(key)
         if value not in (None, "") and not isinstance(value, (dict, list)):
             return value
@@ -1961,6 +1961,15 @@ def pos_family_label(p: object) -> str:
     value = _clean_position_text(p)
     if not value or value in {"NAN", "NONE", "<NA>", "NULL"}:
         return "?"
+
+    # Identifiants TopScorers: 1 gardien, 2 défenseur, 3 centre, 4 ailier.
+    # Accepte aussi leur représentation décimale issue de pandas (ex. 1.0).
+    try:
+        position_id = int(float(value))
+        if float(value) == position_id:
+            return {1: "G", 2: "D", 3: "F", 4: "F"}.get(position_id, "?")
+    except (TypeError, ValueError):
+        pass
 
     compact = value.replace("-", " ").replace("_", " ")
     goalie_words = ("GOALIE", "GOALTENDER", "GOALKEEPER", "GARDIEN", "TORHUTER", "TORHUETER", "PORTIERE")
