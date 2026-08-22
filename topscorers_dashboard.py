@@ -672,6 +672,20 @@ document.addEventListener('DOMContentLoaded', function () {{
   /* ===========================
      INIT (toutes les tables)
   =========================== */
+  function hideTechnicalColumns(table) {{
+    ['mv spark'].forEach(function(name) {{
+      var idx = colIndexByName(table, name);
+      if (idx < 0) return;
+      if (table.tHead && table.tHead.rows.length && table.tHead.rows[0].cells[idx]) {{
+        table.tHead.rows[0].cells[idx].style.display = 'none';
+      }}
+      var rows = table._allRowsMaster || (table.tBodies && table.tBodies[0] ? Array.prototype.slice.call(table.tBodies[0].rows) : []);
+      rows.forEach(function(row) {{
+        if (row.cells[idx]) row.cells[idx].style.display = 'none';
+      }});
+    }});
+  }}
+
   document.querySelectorAll('table').forEach(function (tbl) {{
     captureAllRows(tbl);
     enableTableSortV2(tbl);
@@ -679,6 +693,7 @@ document.addEventListener('DOMContentLoaded', function () {{
     enableColumnToggles(tbl);
     enhancePlayerCells(tbl); // liens pour la page courante
     attachModalDelegate(tbl);
+    hideTechnicalColumns(tbl);
 
   }});
 
@@ -2391,12 +2406,12 @@ def main():
     market_columns = [
         "Décision", "Joueur", "Poste", "Équipe", "Prix", "Offre conseillée",
         "Plafond absolu", "Pression marché", "Offres (#)", "Vendeur",
-        "Expire dans (s)", "Valeur estimée", "Pourquoi"
+        "Expire dans (s)", "Valeur estimée", "Pourquoi", "MV Spark"
     ]
     buy_columns = [
         "Décision", "Joueur", "Poste", "Équipe", "Offre conseillée",
         "Plafond absolu", "Valeur estimée", "Gain pts/match", "Remplace",
-        "Score équipe", "Score trading", "Confiance (%)", "Score décision", "Pourquoi"
+        "Score équipe", "Score trading", "Confiance (%)", "Score décision", "Pourquoi", "MV Spark"
     ]
     df_market_view = df_reco[[col for col in market_columns if col in df_reco.columns]].copy() if not df_reco.empty else df_sales_for_view
     df_buy_view = df_reco[[col for col in buy_columns if col in df_reco.columns]].copy() if not df_reco.empty else pd.DataFrame()
