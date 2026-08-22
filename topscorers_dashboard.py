@@ -1,5 +1,5 @@
 # topscorers_dashboard.py
-import os, sys, time, json, itertools
+import os, sys, time, json, itertools, unicodedata
 import datetime as dt
 from urllib.parse import unquote
 
@@ -26,6 +26,7 @@ RECO_MIN_MARGIN = float(os.getenv("RECO_MIN_MARGIN", "0.10"))
 RECO_MODE = (os.getenv("RECO_MODE", "balanced") or "balanced").strip().lower()
 LEAGUE_MANAGERS = max(2, int(os.getenv("LEAGUE_MANAGERS", "9")))
 BID_INCREMENT = max(1, int(os.getenv("BID_INCREMENT", "1000")))
+LINEUP_REQUIREMENTS = {"G": 1, "D": 6, "F": 9}
 
 # Poids AlphaScore
 ALPHA_W_VALUE   = float(os.getenv("ALPHA_W_VALUE",  "0.30"))
@@ -1179,7 +1180,7 @@ def fetch_my_team_views(s):
         rows.append({
             "ID": p.get("id"),
             "Joueur": f"{p.get('firstname','')} {p.get('lastname','')}".strip(),
-            "Poste": p.get("position_name"),
+            "Poste": _extract_position_label(p),
             "Équipe": team.get("acronym") or team.get("name"),
             "Points": p.get("points"),
             "Pts moy.": p.get("points_avg"),
@@ -1400,6 +1401,7 @@ def fetch_market_enriched(s):
             det = fetch_player_detail(s, pid)
             seas = parse_player_seasons(det)
             rec.update({
+                "POSITION_DETAIL": _extract_position_label(det),
                 "Matchs (saison)": seas["cur_games"],
                 "Pts moy. (saison)": seas["cur_avg"],
                 "Matchs N-1": seas["n1_games"],
@@ -1424,6 +1426,19 @@ def fetch_market_enriched(s):
     df_add = pd.DataFrame(add)
     base = df_add.merge(base, on="player.id", how="right")
 
+    # L'API varie selon les endpoints: on privilégie un libellé textuel et le détail joueur.
+    position_candidates = [
+        "player.position_name", "player.position.name", "player.position.label",
+        "player.position.code", "player.position", "player.role", "POSITION_DETAIL",
+    ]
+    resolved_position = pd.Series(index=base.index, dtype=object)
+    for column in position_candidates:
+        if column in base.columns:
+            candidate = base[column]
+            candidate = candidate.where(candidate.map(lambda value: not isinstance(value, (dict, list))))
+            resolved_position = resolved_position.fillna(candidate)
+    base["player.position_resolved"] = resolved_position
+
     if "price" in base.columns and "MV_MAX_365" in base.columns:
         base["discount_vs_max365_pct"] = ((pd.to_numeric(base["MV_MAX_365"], errors="coerce") - pd.to_numeric(base["price"], errors="coerce")) /
                                           pd.to_numeric(base["MV_MAX_365"], errors="coerce").replace(0, np.nan)) * 100
@@ -1439,7 +1454,7 @@ def fetch_market_enriched(s):
         df_disp["player.is_foreigner"] = df_disp["player.is_foreigner"].fillna(False).astype(bool).map(lambda x: "Étranger" if x else "")
 
     nice = {
-        "player.name":"Joueur","player.position_name":"Poste","team.acronym":"Équipe","player.is_foreigner":"Étranger",
+        "player.name":"Joueur","player.position_resolved":"Poste","team.acronym":"Équipe","player.is_foreigner":"Étranger",
         "price":"Prix","player.marketvalue":"Valeur marchée","discount_pct":"Décote (%)","ratio_pts_per_100k":"Pts / 100k",
         "player.points_avg":"Pts moy.","username":"Vendeur","expires_in":"Expire dans (s)",
         "MV_90": "MV 90 j", "MV_MAX_365":"MV max 365 j", "MV_MIN_365":"MV min 365 j", "MV_MOMENTUM_30":"Momentum 30 j (%)",
@@ -1447,7 +1462,7 @@ def fetch_market_enriched(s):
     }
 
     keep_cols = [c for c in [
-        "player.name","player.position_name","team.acronym","player.is_foreigner",
+        "player.name","player.position_resolved","team.acronym","player.is_foreigner",
         "price","player.marketvalue","discount_pct","ratio_pts_per_100k","player.points_avg",
         "Matchs (équipe)","Matchs (saison)","Pts moy. (saison)","Matchs N-1","Pts moy. N-1","Matchs N-2","Pts moy. N-2","Team PtsAvg",
         "MV_90","MV_MIN_365","MV_MAX_365","MV_MOMENTUM_30","discount_vs_max365_pct","MV Spark",
@@ -1596,9 +1611,9 @@ def _confidence_score(df: pd.DataFrame) -> pd.Series:
     return ((0.45 * game_evidence + 0.25 * season_evidence + 0.30 * history_evidence) * 100).clip(0, 100)
 
 def _replacement_index(roster: pd.DataFrame, family: str):
-    if roster is None or roster.empty or "Poste" not in roster.columns:
+    if family not in LINEUP_REQUIREMENTS or roster is None or roster.empty or "Poste" not in roster.columns:
         return None
-    families = roster["Poste"].astype(str).map(pos_family_label)
+    families = roster["Poste"].map(pos_family_label)
     compatible = roster.loc[families == family]
     if compatible.empty:
         return None
@@ -1620,13 +1635,19 @@ def compute_recommendations_v2(market: pd.DataFrame, roster: pd.DataFrame) -> pd
     out["Profit potentiel"] = (fair - price).round(0)
     out["ROI potentiel (%)"] = (_safe_div(fair - price, price) * 100).round(1)
 
-    replacement_names, replacement_points, replacement_foreign = [], [], []
+    replacement_names, replacement_points, replacement_foreign, position_families = [], [], [], []
     for idx, row in out.iterrows():
-        family = pos_family_label(str(row.get("Poste", "")))
+        family = pos_family_label(row.get("Poste"))
+        position_families.append(family)
         ridx = _replacement_index(roster, family)
+        if family == "?":
+            replacement_names.append("Poste inconnu")
+            replacement_points.append(np.nan)
+            replacement_foreign.append(False)
+            continue
         if ridx is None:
-            replacement_names.append("Place libre")
-            replacement_points.append(0.0)
+            replacement_names.append("Aucun joueur compatible")
+            replacement_points.append(np.nan)
             replacement_foreign.append(False)
             continue
         rrow = roster.loc[ridx]
@@ -1635,6 +1656,7 @@ def compute_recommendations_v2(market: pd.DataFrame, roster: pd.DataFrame) -> pd
         replacement_points.append(float(rproj) if pd.notna(rproj) else 0.0)
         replacement_foreign.append("étranger" in str(rrow.get("Étranger", "")).lower())
 
+    out["Famille poste"] = position_families
     out["Remplace"] = replacement_names
     out["Pts remplacé"] = replacement_points
     out["Gain pts/match"] = (_num_series(out, "Projection pts") - _num_series(out, "Pts remplacé")).round(2)
@@ -1715,6 +1737,14 @@ def compute_recommendations_v2(market: pd.DataFrame, roster: pd.DataFrame) -> pd
 
     decisions, reasons = [], []
     for idx, row in out.iterrows():
+        if row.get("Famille poste") == "?":
+            decisions.append("ÉVITER")
+            reasons.append("poste non reconnu — remplacement interdit par sécurité")
+            continue
+        if row.get("Remplace") == "Aucun joueur compatible":
+            decisions.append("ÉVITER")
+            reasons.append("aucun remplacement du même poste disponible")
+            continue
         p = float(row.get("Prix") or 0)
         max_bid = float(row.get("Enchère max") or 0) if pd.notna(row.get("Enchère max")) else 0
         gain_i = float(row.get("Gain pts/match") or 0)
@@ -1884,28 +1914,70 @@ def fetch_team_meta(s, team_id: int):
     except Exception:
         return None, None, ""
 
-def pos_family_label(p: object) -> str:
-    """Normalise un poste TopScorers, y compris les valeurs absentes ou numériques."""
-    if p is None:
-        return "W"
+def _clean_position_text(value: object) -> str:
+    if value is None:
+        return ""
     try:
-        if pd.isna(p):
-            return "W"
+        if pd.isna(value):
+            return ""
     except (TypeError, ValueError):
         pass
+    text = unicodedata.normalize("NFKD", str(value))
+    return "".join(ch for ch in text if not unicodedata.combining(ch)).strip().upper()
 
-    value = str(p).strip().upper()
-    if not value or value in {"NAN", "NONE", "<NA>"}:
-        return "W"
-    if value.startswith("G"):
+
+def _extract_position_label(payload: object) -> object:
+    """Trouve un libellé de poste dans les différentes formes renvoyées par l'API."""
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data", payload)
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    if not isinstance(data, dict):
+        return None
+
+    for key in ("position_name", "position_code", "position_label", "role"):
+        value = data.get(key)
+        if value not in (None, "") and not isinstance(value, (dict, list)):
+            return value
+
+    position = data.get("position")
+    if isinstance(position, dict):
+        for key in ("name", "label", "code", "short_name"):
+            value = position.get(key)
+            if value not in (None, ""):
+                return value
+    elif position not in (None, "") and not isinstance(position, list):
+        return position
+
+    player = data.get("player")
+    if isinstance(player, dict) and player is not data:
+        return _extract_position_label(player)
+    return None
+
+
+def pos_family_label(p: object) -> str:
+    """Retourne G, D, F ou ?; un poste inconnu n'est jamais supposé attaquant."""
+    value = _clean_position_text(p)
+    if not value or value in {"NAN", "NONE", "<NA>", "NULL"}:
+        return "?"
+
+    compact = value.replace("-", " ").replace("_", " ")
+    goalie_words = ("GOALIE", "GOALTENDER", "GOALKEEPER", "GARDIEN", "TORHUTER", "TORHUETER", "PORTIERE")
+    defender_words = ("DEFENSEUR", "DEFENSE", "DEFENCEMAN", "DEFENDER", "VERTEIDIGER")
+    forward_words = ("ATTAQUANT", "FORWARD", "AILIER", "WINGER", "CENTRE", "CENTER", "STURMER", "STUER")
+    if value == "G" or any(word in compact for word in goalie_words):
         return "G"
-    if value.startswith("D"):
+    if value == "D" or any(word in compact for word in defender_words):
         return "D"
-    if value.startswith("C"):
-        return "C"
-    if "W" in value or "AIL" in value:
-        return "W"
-    return "W"
+    if value in {"F", "C", "W", "LW", "RW"} or any(word in compact for word in forward_words):
+        return "F"
+    return "?"
+
+
+def _player_name_key(value: object) -> str:
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    return "".join(ch for ch in text if not unicodedata.combining(ch)).strip().casefold()
 
 def build_my_enriched_roster(s, my_team_id: str, team_games_map: dict, team_ptsavg_map: dict) -> pd.DataFrame:
     if not my_team_id:
@@ -1926,9 +1998,11 @@ def build_my_enriched_roster(s, my_team_id: str, team_games_map: dict, team_ptsa
 
         cur_games = cur_avg = n1_games = n1_avg = n2_games = n2_avg = None
         mv90 = mvmax = mvmin = momentum = None
+        detail_position = None
         try:
             if isinstance(pid, int):
                 det = fetch_player_detail(s, pid)
+                detail_position = _extract_position_label(det)
                 seas = parse_player_seasons(det)
                 cur_games, cur_avg = seas["cur_games"], seas["cur_avg"]
                 n1_games, n1_avg   = seas["n1_games"],  seas["n1_avg"]
@@ -1943,7 +2017,7 @@ def build_my_enriched_roster(s, my_team_id: str, team_games_map: dict, team_ptsa
         rows.append({
             "ID": pid,
             "Joueur": f"{p.get('firstname','')} {p.get('lastname','')}".strip(),
-            "Poste": p.get("position_name"),
+            "Poste": _extract_position_label(p) or detail_position,
             "Équipe": t.get("acronym") or t.get("name") or "",
             "Points": p.get("points"),
             "Pts moy.": p.get("points_avg"),
@@ -2014,7 +2088,7 @@ def build_owner_rosters(s, my_team_id: str, other_team_ids_env: str,
             rows.append({
                 "ID": pid,
                 "Joueur": f"{p.get('firstname','')} {p.get('lastname','')}".strip(),
-                "Poste": p.get("position_name"),
+                "Poste": _extract_position_label(p),
                 "Équipe": t.get("acronym") or t.get("name") or "",
                 "Propriétaire": owner_label,
                 "Points": p.get("points"),
@@ -2103,7 +2177,7 @@ def fetch_all_players_by_teams(s, team_ids: list, fetch_details: bool,
             rows.append({
                 "ID": pid,
                 "Joueur": f"{p.get('firstname','')} {p.get('lastname','')}".strip(),
-                "Poste": p.get("position_name"),
+                "Poste": _extract_position_label(p),
                 "Équipe": t.get("acronym") or t.get("name") or "",
                 "Points": p.get("points"),
                 "Pts moy.": p.get("points_avg"),
@@ -2399,22 +2473,46 @@ def main():
     })
 
     lineup_missing = 0
+    lineup_counts = {"G": 0, "D": 0, "F": 0, "?": 0}
     if df_lineup is not None and not df_lineup.empty and "Actuel" in df_lineup.columns:
-        current_slots = df_lineup["Actuel"].astype(str).str.strip().str.lower()
-        lineup_missing = int(current_slots.isin(["", "none", "nan", "null"]).sum())
+        current_slots = df_lineup["Actuel"].astype(str).str.strip()
+        missing_mask = current_slots.str.lower().isin(["", "none", "nan", "null"])
+        lineup_missing = int(missing_mask.sum())
+        position_by_name = {}
+        if df_my_enriched is not None and not df_my_enriched.empty:
+            for _, player_row in df_my_enriched.iterrows():
+                position_by_name[_player_name_key(player_row.get("Joueur"))] = pos_family_label(player_row.get("Poste"))
+        for player_name in current_slots.loc[~missing_mask]:
+            family = position_by_name.get(_player_name_key(player_name), "?")
+            lineup_counts[family] = lineup_counts.get(family, 0) + 1
+
+    lineup_shortages = {
+        family: max(required - lineup_counts.get(family, 0), 0)
+        for family, required in LINEUP_REQUIREMENTS.items()
+    }
     lineup_penalty = lineup_missing * 50
-    lineup_state = (
-        "<div class='alert alert-success py-2 mb-3'>Composition complète : aucune pénalité de place vide détectée.</div>"
-        if lineup_missing == 0
-        else f"<div class='alert alert-danger py-2 mb-3'><b>{lineup_missing} place(s) vide(s)</b> : risque de -{lineup_penalty} points au prochain match.</div>"
-    )
+    lineup_valid = lineup_missing == 0 and not any(lineup_shortages.values()) and lineup_counts["?"] == 0
+    if lineup_valid:
+        lineup_state = "<div class='alert alert-success py-2 mb-3'>Composition valide : 1 gardien, 6 défenseurs et 9 attaquants.</div>"
+    else:
+        issues = []
+        labels = {"G": "gardien", "D": "défenseur(s)", "F": "attaquant(s)"}
+        issues.extend(f"{count} {labels[family]} manquant(s)" for family, count in lineup_shortages.items() if count)
+        if lineup_counts["?"]:
+            issues.append(f"{lineup_counts['?']} poste(s) non reconnu(s)")
+        if lineup_missing:
+            issues.append(f"{lineup_missing} place(s) vide(s), risque de -{lineup_penalty} points")
+        lineup_state = f"<div class='alert alert-danger py-2 mb-3'><b>Composition à corriger :</b> {' · '.join(issues)}</div>"
     sections.append({
         "id": "tabLineup",
         "title": "Compo",
         "content": f"""
 <div class="row g-3 mb-3">
-  <div class="col-6"><div class="card p-3 h-100"><div class="small text-secondary">Places vides</div><div class="h3 m-0">{lineup_missing}</div></div></div>
-  <div class="col-6"><div class="card p-3 h-100"><div class="small text-secondary">Pénalité potentielle</div><div class="h3 m-0 text-danger">-{lineup_penalty}</div></div></div>
+  <div class="col-6 col-xl"><div class="card p-3 h-100"><div class="small text-secondary">Gardiens</div><div class="h3 m-0">{lineup_counts["G"]}/1</div></div></div>
+  <div class="col-6 col-xl"><div class="card p-3 h-100"><div class="small text-secondary">Défenseurs</div><div class="h3 m-0">{lineup_counts["D"]}/6</div></div></div>
+  <div class="col-6 col-xl"><div class="card p-3 h-100"><div class="small text-secondary">Attaquants</div><div class="h3 m-0">{lineup_counts["F"]}/9</div></div></div>
+  <div class="col-6 col-xl"><div class="card p-3 h-100"><div class="small text-secondary">Places vides</div><div class="h3 m-0">{lineup_missing}</div></div></div>
+  <div class="col-6 col-xl"><div class="card p-3 h-100"><div class="small text-secondary">Pénalité potentielle</div><div class="h3 m-0 text-danger">-{lineup_penalty}</div></div></div>
 </div>
 {lineup_state}
 <div class="card p-3">
@@ -2623,7 +2721,7 @@ document.addEventListener('DOMContentLoaded', function () {
       <thead><tr><th>Onglet</th><th>À quoi il sert</th><th>Quand le consulter</th></tr></thead>
       <tbody>
         <tr><td><b>Live</b></td><td>Points de Droken, joueurs alignés, événements et matchs.</td><td>Pendant les rencontres.</td></tr>
-        <tr><td><b>Compo</b></td><td>Contrôle les slots et calcule la pénalité potentielle des places vides.</td><td>Avant le premier match.</td></tr>
+        <tr><td><b>Compo</b></td><td>Valide les 16 alignés : 1 gardien, 6 défenseurs et 9 attaquants, puis calcule les places vides.</td><td>Avant le premier match.</td></tr>
         <tr><td><b>Maintenant</b></td><td>Plan d’achats optimisé selon ton budget réel.</td><td>À chaque nouvelle vente.</td></tr>
         <tr><td><b>Mon équipe</b></td><td>Décision garder, vendre, écouter ou remplacer pour chaque joueur.</td><td>Pour gérer l’effectif.</td></tr>
         <tr><td><b>À vendre</b></td><td>Joueurs dont la vente ou le remplacement est prioritaire.</td><td>Quand tu dois libérer du budget.</td></tr>
@@ -2669,7 +2767,8 @@ document.addEventListener('DOMContentLoaded', function () {
       <h3 class="h5">Scores du moteur</h3>
       <ul class="mb-0">
         <li><b>Projection pts</b> : moyenne pondérée de la saison, N-1 et N-2.</li>
-        <li><b>Gain pts/match</b> : projection de la cible moins celle du joueur remplacé.</li>
+        <li><b>Gain pts/match</b> : projection de la cible moins celle du joueur remplacé, obligatoirement dans la même famille de poste.</li>
+        <li><b>Famille poste</b> : G = gardien, D = défenseur, F = attaquant (centres et ailiers réunis).</li>
         <li><b>Score équipe</b> : intérêt sportif pour Droken.</li>
         <li><b>Score trading</b> : potentiel de plus-value.</li>
         <li><b>Confiance</b> : quantité et solidité des données disponibles.</li>
@@ -2690,6 +2789,16 @@ document.addEventListener('DOMContentLoaded', function () {
       </ul>
     </div>
   </div>
+</div>
+
+<div class="card p-3 mb-3">
+  <h3 class="h5">Règles de composition et de remplacement</h3>
+  <ul class="mb-0">
+    <li>Une composition valide aligne exactement <b>1 gardien, 6 défenseurs et 9 attaquants</b>.</li>
+    <li>Le moteur compare uniquement des joueurs compatibles : gardien contre gardien, défenseur contre défenseur, attaquant contre attaquant.</li>
+    <li>Centres et ailiers appartiennent tous à la famille des attaquants et peuvent donc être comparés entre eux.</li>
+    <li>Les libellés français, anglais et allemands sont normalisés. Si un poste reste inconnu, la décision devient <b>ÉVITER</b> et aucun remplacement n’est proposé.</li>
+  </ul>
 </div>
 
 <div class="card p-3 mb-3">
@@ -2723,7 +2832,7 @@ document.addEventListener('DOMContentLoaded', function () {
 <div class="card p-3">
   <h3 class="h5">Bonnes pratiques pour gagner</h3>
   <ol class="mb-0">
-    <li>Vérifie toujours <b>Compo</b> avant le premier match : chaque place vide coûte 50 points.</li>
+    <li>Vérifie toujours <b>Compo</b> avant le premier match : il faut 1 G / 6 D / 9 A et chaque place vide coûte 50 points.</li>
     <li>Place l’<b>offre conseillée</b> assez tôt en cas d’égalité, car la première offre identique est prioritaire.</li>
     <li>Ne dépasse jamais le <b>plafond absolu</b> sous l’effet de la concurrence.</li>
     <li>Privilégie le <b>gain pts/match</b> pour renforcer Droken et le ROI pour une opération de revente.</li>
