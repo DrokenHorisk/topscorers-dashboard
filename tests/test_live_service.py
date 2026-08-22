@@ -9,7 +9,7 @@ class LiveServiceTests(unittest.TestCase):
             "id": 42,
             "firstname": "Test",
             "lastname": "Player",
-            "position_name": "C",
+            "position_id": 3,
             "team": {"acronym": "LHC"},
             "live_points": 87,
             "live_stats": {
@@ -23,6 +23,7 @@ class LiveServiceTests(unittest.TestCase):
         }
         row = live_service._player_row(player, {"42"}, stats_source=True)
         self.assertEqual(row["name"], "Test Player")
+        self.assertEqual(row["position"], "Attaquant")
         self.assertTrue(row["lined_up"])
         self.assertEqual(row["live_points"], 87)
         self.assertEqual(row["stats"]["assists"], 1)
@@ -34,7 +35,7 @@ class LiveServiceTests(unittest.TestCase):
         row = live_service._player_row({**roster_player, **live_player}, {"42"}, stats_source=True)
         self.assertEqual(row["name"], "Connor Hughes")
         self.assertEqual(row["team"], "SCB")
-        self.assertEqual(row["position"], "C")
+        self.assertEqual(row["position"], "Attaquant")
 
     def test_official_scoring_contains_positive_and_discipline_events(self):
         scoring = live_service.OFFICIAL_SCORING

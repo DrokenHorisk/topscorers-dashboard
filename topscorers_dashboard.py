@@ -256,6 +256,10 @@ def build_html_page(sections, must_buy_threshold: float):
               <div id="pmSpark" style="min-height:44px">—</div>
               <div id="pmDetails" class="small mt-2 text-secondary">—</div>
             </div>
+            <div class="statcard mt-3">
+              <div class="label mb-2">Analyse et recommandation</div>
+              <div id="pmAnalysis" class="small">—</div>
+            </div>
           </div>
           <div class="col-lg-5">
             <div class="row g-2">
@@ -275,6 +279,12 @@ def build_html_page(sections, must_buy_threshold: float):
                 <div class="statcard">
                   <div class="label">Valeur / Prix</div>
                   <div class="value" id="pmVal">—</div>
+                </div>
+              </div>
+              <div class="col-12">
+                <div class="statcard">
+                  <div class="label mb-1">Statistiques disponibles</div>
+                  <div id="pmStats" class="small">—</div>
                 </div>
               </div>
             </div>
@@ -568,10 +578,58 @@ document.addEventListener('DOMContentLoaded', function () {{
     if (mvmax) details.push('<b>Max 365 j</b> : ' + mvmax);
     if (mom30) details.push('<b>Momentum 30 j</b> : ' + mom30);
     if (discMx)details.push('<b>Décote vs max 365</b> : ' + discMx);
-    modalEl.querySelector('#pmDetails').innerHTML = details.length ? details.join(' · ') : "<span class='text-secondary'>—</span>";
+    modalEl.querySelector('#pmDetails').innerHTML = details.length ? details.join(' · ') : "<span class='text-secondary'>Historique indisponible pour cette vue.</span>";
+
+    var analysis = [];
+    [['Décision','décision'], ['Action','action'], ['Projection','projection pts'], ['Gain','gain pts/match'],
+     ['Confiance','confiance'], ['Pourquoi','pourquoi'], ['Remplace','remplace']].forEach(function(item) {{
+      var value = getTxt(item[1]);
+      if (value) analysis.push('<b>' + item[0] + '</b> : ' + value);
+    }});
+    modalEl.querySelector('#pmAnalysis').innerHTML = analysis.length ? analysis.join('<br>') : "<span class='text-secondary'>Aucune recommandation supplémentaire dans cette vue.</span>";
+
+    var rowStats = [];
+    [['Points saison','points'], ['Matchs','matchs (saison)'], ['Pts N-1','pts moy. n-1'],
+     ['Pts N-2','pts moy. n-2'], ['Étranger','étranger']].forEach(function(item) {{
+      var value = getTxt(item[1]);
+      if (value) rowStats.push('<b>' + item[0] + '</b> : ' + value);
+    }});
+    modalEl.querySelector('#pmStats').innerHTML = rowStats.length ? rowStats.join('<br>') : "<span class='text-secondary'>—</span>";
 
     bsModal.show();
   }}
+
+  window.openLivePlayerModal = function(player) {{
+    if (!bsModal || !player) return;
+    var position = player.position || 'Poste inconnu';
+    modalEl.querySelector('#pmAvatar').textContent = initials(player.name || '');
+    modalEl.querySelector('#pmName').textContent = player.name || 'Joueur';
+    modalEl.querySelector('#pmTeamBadge').textContent = player.team || '—';
+    modalEl.querySelector('#pmPosBadge').textContent = position;
+    modalEl.querySelector('#pmPts').textContent = player.season_points ?? '—';
+    modalEl.querySelector('#pmVal').textContent = player.marketvalue != null ? Number(player.marketvalue).toLocaleString('fr-FR') : '—';
+    modalEl.querySelector('#pmAlpha').textContent = player.live_points ?? '—';
+    modalEl.querySelector('#pmSpark').innerHTML = "<span class='text-secondary'>Données mises à jour depuis le Live TopScorers.</span>";
+    modalEl.querySelector('#pmDetails').innerHTML =
+      '<b>État</b> : ' + (player.playing ? 'Sur la glace' : player.lined_up ? 'Aligné' : 'Banc') +
+      ' · <b>Points live</b> : ' + (player.live_points ?? '—');
+
+    var labels = {{
+      goals:'Buts', assists:'Assists', shots_on_goal:'Tirs cadrés', blocked_shots:'Tirs bloqués',
+      penalty_minutes:'Minutes de pénalité', plus_minus:'+/-', faceoffs_won:'Engagements gagnés',
+      faceoffs_lost:'Engagements perdus', saves:'Arrêts', goals_against:'Buts encaissés',
+      time_on_ice:'Temps de glace'
+    }};
+    var stats = [];
+    Object.keys(labels).forEach(function(key) {{
+      var value = player.stats && player.stats[key];
+      if (value !== null && value !== undefined) stats.push('<b>' + labels[key] + '</b> : ' + value);
+    }});
+    modalEl.querySelector('#pmStats').innerHTML = stats.length ? stats.join('<br>') : "<span class='text-secondary'>Aucune statistique de match disponible actuellement.</span>";
+    modalEl.querySelector('#pmAnalysis').innerHTML =
+      "<span class='text-secondary'>La fiche Live utilise les données officielles disponibles à cet instant.</span>";
+    bsModal.show();
+  }};
 
   function attachModalDelegate(table) {{
     if (!table || table._pmDelegateAttached) return;
@@ -1180,7 +1238,7 @@ def fetch_my_team_views(s):
         rows.append({
             "ID": p.get("id"),
             "Joueur": f"{p.get('firstname','')} {p.get('lastname','')}".strip(),
-            "Poste": _extract_position_label(p),
+            "Poste": position_display_label(_extract_position_label(p)),
             "Équipe": team.get("acronym") or team.get("name"),
             "Points": p.get("points"),
             "Pts moy.": p.get("points_avg"),
@@ -1197,12 +1255,12 @@ def fetch_my_team_views(s):
         avail  = slot.get("available") or []
         pool   = slot.get("lined_up") or []
         line_rows.append({
-            "Slot": pos_id,
+            "Poste": position_display_label(pos_id),
             "Actuel": id2name.get(cur_id, cur_id),
             "Banc dispo (#)": len(avail),
             "Candidats (#)": len(pool),
         })
-    df_lineup = pd.DataFrame(line_rows).sort_values("Slot")
+    df_lineup = pd.DataFrame(line_rows)
     return df_effectif, df_lineup, my_username
 
 def fetch_team_username(s, team_id:int) -> str:
@@ -1437,7 +1495,7 @@ def fetch_market_enriched(s):
             candidate = base[column]
             candidate = candidate.where(candidate.map(lambda value: not isinstance(value, (dict, list))))
             resolved_position = resolved_position.fillna(candidate)
-    base["player.position_resolved"] = resolved_position
+    base["player.position_resolved"] = resolved_position.map(position_display_label)
 
     if "price" in base.columns and "MV_MAX_365" in base.columns:
         base["discount_vs_max365_pct"] = ((pd.to_numeric(base["MV_MAX_365"], errors="coerce") - pd.to_numeric(base["price"], errors="coerce")) /
@@ -1984,6 +2042,16 @@ def pos_family_label(p: object) -> str:
     return "?"
 
 
+def position_display_label(value: object) -> str:
+    """Libellé utilisateur; les codes G/D/F restent réservés aux calculs."""
+    return {
+        "G": "Gardien",
+        "D": "Défenseur",
+        "F": "Attaquant",
+        "?": "Poste inconnu",
+    }[pos_family_label(value)]
+
+
 def _player_name_key(value: object) -> str:
     text = unicodedata.normalize("NFKD", str(value or ""))
     return "".join(ch for ch in text if not unicodedata.combining(ch)).strip().casefold()
@@ -2026,7 +2094,7 @@ def build_my_enriched_roster(s, my_team_id: str, team_games_map: dict, team_ptsa
         rows.append({
             "ID": pid,
             "Joueur": f"{p.get('firstname','')} {p.get('lastname','')}".strip(),
-            "Poste": _extract_position_label(p) or detail_position,
+            "Poste": position_display_label(_extract_position_label(p) or detail_position),
             "Équipe": t.get("acronym") or t.get("name") or "",
             "Points": p.get("points"),
             "Pts moy.": p.get("points_avg"),
@@ -2097,7 +2165,7 @@ def build_owner_rosters(s, my_team_id: str, other_team_ids_env: str,
             rows.append({
                 "ID": pid,
                 "Joueur": f"{p.get('firstname','')} {p.get('lastname','')}".strip(),
-                "Poste": _extract_position_label(p),
+                "Poste": position_display_label(_extract_position_label(p)),
                 "Équipe": t.get("acronym") or t.get("name") or "",
                 "Propriétaire": owner_label,
                 "Points": p.get("points"),
@@ -2186,7 +2254,7 @@ def fetch_all_players_by_teams(s, team_ids: list, fetch_details: bool,
             rows.append({
                 "ID": pid,
                 "Joueur": f"{p.get('firstname','')} {p.get('lastname','')}".strip(),
-                "Poste": _extract_position_label(p),
+                "Poste": position_display_label(_extract_position_label(p)),
                 "Équipe": t.get("acronym") or t.get("name") or "",
                 "Points": p.get("points"),
                 "Pts moy.": p.get("points_avg"),
@@ -2425,10 +2493,11 @@ def main():
     message.className = "alert py-2 " + (data.status === "LIVE" ? "alert-success" : data.status === "ERROR" ? "alert-danger" : "alert-secondary");
 
     const players = Array.isArray(data.players) ? data.players : [];
+    window.__livePlayers = Object.fromEntries(players.map(player => [String(player.id), player]));
     document.getElementById("livePlayers").innerHTML = players.length ? players.map(player => {
       const state = player.playing ? "Sur la glace" : player.lined_up ? "Aligné" : "Banc";
       return "<tr>" +
-        "<td><strong>" + esc(player.name) + "</strong><div class='small text-secondary'>" + esc(player.position) + "</div></td>" +
+        "<td><a href='#' class='pm-open live-player-open' data-player-id='" + esc(player.id) + "'><strong>" + esc(player.name) + "</strong></a><div class='small text-secondary'>" + esc(player.position) + "</div></td>" +
         "<td>" + esc(player.team) + "</td><td>" + esc(state) + "</td>" +
         "<td><strong>" + number(player.live_points) + "</strong></td>" +
         "<td>" + stat(player,"goals") + "</td><td>" + stat(player,"assists") + "</td>" +
@@ -2470,6 +2539,13 @@ def main():
     }
   }
 
+  root.addEventListener("click", event => {
+    const link = event.target.closest(".live-player-open");
+    if (!link) return;
+    event.preventDefault();
+    const player = window.__livePlayers && window.__livePlayers[String(link.dataset.playerId)];
+    if (player && window.openLivePlayerModal) window.openLivePlayerModal(player);
+  });
   document.getElementById("liveRefresh").addEventListener("click", () => refresh(true));
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(true); });
   document.querySelectorAll('[data-bs-toggle="tab"]').forEach(tab => tab.addEventListener("shown.bs.tab", event => {
