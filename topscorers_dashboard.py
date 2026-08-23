@@ -1795,6 +1795,8 @@ def compute_recommendations_v2(market: pd.DataFrame, roster: pd.DataFrame) -> pd
     try:
         history = pd.read_csv(BID_HISTORY_CSV)
         if not history.empty:
+            if "result" in history.columns:
+                history = history[history["result"].astype(str).str.lower().isin(["won", "lost", "gagnée", "gagnee", "perdue"])]
             history["ratio"] = pd.to_numeric(history.get("bid_amount"), errors="coerce") / pd.to_numeric(history.get("market_price"), errors="coerce").replace(0, np.nan)
             history["premium"] = (history["ratio"] - 1.0).clip(lower=0, upper=1.0)
             for idx, row in out.iterrows():
