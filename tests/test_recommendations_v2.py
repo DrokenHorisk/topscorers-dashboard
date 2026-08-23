@@ -55,7 +55,8 @@ class RecommendationV2Tests(unittest.TestCase):
         self.assertEqual(centre["Remplace"], "Ailier faible")
         self.assertGreater(centre["Gain pts/match"], 3.0)
         self.assertGreater(centre["Valeur estimée"], centre["Prix"])
-        self.assertLessEqual(centre["Enchère max"], centre["Valeur estimée"])
+        self.assertGreaterEqual(centre["Enchère max"], centre["Offre conseillée"])
+        self.assertIn("Surprime vs valeur (%)", result.columns)
 
     def test_optimizer_respects_budget_and_unique_replacements(self):
         result = dashboard.compute_recommendations_v2(self.market, self.roster)
@@ -139,6 +140,22 @@ class RecommendationV2Tests(unittest.TestCase):
         self.assertGreaterEqual(row["Offre conseillée"], 285_000)
         self.assertGreaterEqual(row["Plafond absolu"], row["Offre conseillée"])
         self.assertGreater(row["Offre conseillée"], row["Prix"])
+
+    def test_goalie_from_favorite_club_gets_strong_competition_range(self):
+        market = self.market.iloc[[0]].copy()
+        market.loc[market.index[0], "Joueur"] = "Kevin Pasche"
+        market.loc[market.index[0], "Poste"] = "Gardien"
+        market.loc[market.index[0], "Équipe"] = "LHC"
+        market.loc[market.index[0], "Prix"] = 409_000
+        market.loc[market.index[0], "Valeur marchée"] = 409_000
+        market.loc[market.index[0], "MV max 365 j"] = 818_000
+        market.loc[market.index[0], "MV min 365 j"] = 409_000
+        result = dashboard.compute_recommendations_v2(market, self.roster)
+        row = result.iloc[0]
+        self.assertIn(row["Pression marché"], {"Très forte", "Extrême"})
+        self.assertGreater(row["Offre conseillée"], 550_000)
+        self.assertLessEqual(row["Offre conseillée"], row["Fourchette haute"])
+        self.assertGreaterEqual(row["Plafond absolu"], row["Fourchette haute"])
 
     def test_roster_strategy_proposes_replacements_and_sale_prices(self):
         recommendations = dashboard.compute_recommendations_v2(self.market, self.roster)

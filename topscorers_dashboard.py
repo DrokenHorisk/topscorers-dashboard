@@ -21,6 +21,10 @@ TEAM_QUERY     = (os.getenv("TOPS_TEAM_QUERY") or "").strip()
 RECO_BUDGET    = int(os.getenv("RECO_BUDGET", "10000000"))
 OUTPUT_HTML    = os.getenv("DASHBOARD_HTML", "dashboard_topscorers.html")
 RECO_HISTORY_CSV = os.getenv("RECOMMENDATION_HISTORY_CSV", "/data/recommendation_history.csv")
+BID_HISTORY_CSV = os.getenv("BID_HISTORY_CSV", "/data/bid_history.csv")
+FAVORITE_TEAM_ACRONYMS = {
+    item.strip().upper() for item in os.getenv("FAVORITE_TEAM_ACRONYMS", "LHC").split(",") if item.strip()
+}
 RECO_MAX_ACTIONS = int(os.getenv("RECO_MAX_ACTIONS", "5"))
 RECO_MIN_MARGIN = float(os.getenv("RECO_MIN_MARGIN", "0.10"))
 RECO_MODE = (os.getenv("RECO_MODE", "balanced") or "balanced").strip().lower()
@@ -1774,22 +1778,56 @@ def compute_recommendations_v2(market: pd.DataFrame, roster: pd.DataFrame) -> pd
     combined = combined - 4.0 * pd.Series(net_foreign, index=out.index).clip(lower=0)
     out["Score décision"] = combined.clip(0, 100).round(1)
 
-    # Une ligue à plusieurs managers exige une offre réaliste, distincte du plafond absolu.
+    # Pression de ligue: rareté du poste, affinité locale, historique de valeur et apprentissage des enchères.
     target_margin = (RECO_MIN_MARGIN + (100 - confidence) / 1000.0).clip(lower=0.06, upper=0.20)
     team_premium = ((_num_series(out, "Score équipe") / 100.0) * 0.05).clip(0, 0.05)
     offers = _num_series(out, "Offres (#)").fillna(0).clip(lower=0)
     manager_pressure = min(1.0, max(0.0, (LEAGUE_MANAGERS - 1) / 8.0))
+    family_series = out["Famille poste"].astype(str)
+    scarcity_pct = family_series.map({"G": 0.12, "D": 0.045, "F": 0.025}).fillna(0.0)
+    affinity_pct = out.get("Équipe", pd.Series("", index=out.index)).astype(str).str.upper().isin(FAVORITE_TEAM_ACRONYMS).astype(float) * 0.08
+
+    historic_max = _num_series(out, "MV max 365 j")
+    historic_gap = (_safe_div(historic_max, price.replace(0, np.nan)) - 1.0).clip(lower=0, upper=1.0)
+    historic_pct = (historic_gap * 0.25).fillna(0.0)
+
+    learned_pct = pd.Series(0.0, index=out.index, dtype="float64")
+    try:
+        history = pd.read_csv(BID_HISTORY_CSV)
+        if not history.empty:
+            history["ratio"] = pd.to_numeric(history.get("bid_amount"), errors="coerce") / pd.to_numeric(history.get("market_price"), errors="coerce").replace(0, np.nan)
+            history["premium"] = (history["ratio"] - 1.0).clip(lower=0, upper=1.0)
+            for idx, row in out.iterrows():
+                matches = history.copy()
+                if "position_family" in matches.columns:
+                    same_family = matches["position_family"].astype(str).str.upper() == str(row.get("Famille poste", "")).upper()
+                    if same_family.any():
+                        matches = matches[same_family]
+                if "team" in matches.columns:
+                    same_team = matches["team"].astype(str).str.upper() == str(row.get("Équipe", "")).upper()
+                    if same_team.any():
+                        matches = matches[same_team]
+                values = pd.to_numeric(matches.get("premium"), errors="coerce").dropna()
+                if not values.empty:
+                    learned_pct.loc[idx] = min(0.40, float(values.tail(20).median()))
+    except (FileNotFoundError, pd.errors.EmptyDataError, OSError, ValueError):
+        pass
+
     competition_pct = (
         0.025
         + 0.020 * manager_pressure
         + 0.012 * offers.clip(upper=3)
         + 0.010 * (_num_series(out, "Score équipe") >= 75).astype(float)
-    ).clip(upper=0.10)
+        + scarcity_pct
+        + affinity_pct
+        + historic_pct
+        + learned_pct * 0.45
+    ).clip(upper=0.60)
     out["Prime concurrence (%)"] = (competition_pct * 100).round(1)
     out["Pression marché"] = pd.cut(
         competition_pct,
-        bins=[-np.inf, 0.05, 0.075, np.inf],
-        labels=["Normale", "Forte", "Très forte"],
+        bins=[-np.inf, 0.10, 0.22, 0.38, np.inf],
+        labels=["Normale", "Forte", "Très forte", "Extrême"],
     ).astype(str)
 
     def _ceil_bid(value):
@@ -1797,14 +1835,26 @@ def compute_recommendations_v2(market: pd.DataFrame, roster: pd.DataFrame) -> pd
             return 0.0
         return float(np.ceil(float(value) / BID_INCREMENT) * BID_INCREMENT)
 
-    competitive_bid = (price * (1.0 + competition_pct)).map(_ceil_bid)
-    raw_ceiling = fair * (1.0 - target_margin + team_premium + competition_pct * 0.55)
-    absolute_ceiling = pd.concat([raw_ceiling, competitive_bid], axis=1).max(axis=1)
-    absolute_ceiling = pd.concat([absolute_ceiling, fair * 0.99], axis=1).min(axis=1).map(_ceil_bid)
-    advised_bid = pd.concat([competitive_bid, absolute_ceiling], axis=1).min(axis=1).map(_ceil_bid)
+    expected_bid = (price * (1.0 + competition_pct)).map(_ceil_bid)
+    range_low = (price * (1.0 + (competition_pct - 0.06).clip(lower=0.02))).map(_ceil_bid)
+    range_high = (price * (1.0 + competition_pct + 0.08)).map(_ceil_bid)
 
+    value_ceiling = fair * (1.0 - target_margin + team_premium + competition_pct * 0.55)
+    strategic_anchor = pd.concat([
+        value_ceiling,
+        historic_max.fillna(0) * (0.72 + 0.10 * (family_series == "G").astype(float)),
+        expected_bid,
+    ], axis=1).max(axis=1)
+    # Un plafond stratégique peut dépasser la valeur estimée en cas de rareté extrême,
+    # mais reste séparé de la valeur économique pour rendre le risque visible.
+    absolute_ceiling = pd.concat([strategic_anchor, range_high], axis=1).max(axis=1).map(_ceil_bid)
+    advised_bid = pd.concat([expected_bid, absolute_ceiling], axis=1).min(axis=1).map(_ceil_bid)
+
+    out["Fourchette basse"] = range_low
+    out["Fourchette haute"] = range_high
     out["Offre conseillée"] = advised_bid
     out["Plafond absolu"] = absolute_ceiling
+    out["Surprime vs valeur (%)"] = ((_safe_div(advised_bid, fair) - 1.0) * 100).round(1)
     # Alias conservé pour l'historique et les consommateurs existants.
     out["Enchère max"] = out["Plafond absolu"]
 
@@ -2404,13 +2454,13 @@ def main():
         df_action_plan = reorder_columns(df_action_plan, decision_columns)
 
     market_columns = [
-        "Décision", "Joueur", "Poste", "Équipe", "Prix", "Offre conseillée",
-        "Plafond absolu", "Pression marché", "Offres (#)", "Vendeur",
+        "Décision", "Joueur", "Poste", "Équipe", "Prix", "Fourchette basse", "Offre conseillée", "Fourchette haute",
+        "Plafond absolu", "Pression marché", "Prime concurrence (%)", "Offres (#)", "Vendeur",
         "Expire dans (s)", "Valeur estimée", "Pourquoi", "MV Spark"
     ]
     buy_columns = [
-        "Décision", "Joueur", "Poste", "Équipe", "Offre conseillée",
-        "Plafond absolu", "Valeur estimée", "Gain pts/match", "Remplace",
+        "Décision", "Joueur", "Poste", "Équipe", "Fourchette basse", "Offre conseillée",
+        "Fourchette haute", "Plafond absolu", "Pression marché", "Valeur estimée", "Gain pts/match", "Remplace",
         "Score équipe", "Score trading", "Confiance (%)", "Score décision", "Pourquoi", "MV Spark"
     ]
     df_market_view = df_reco[[col for col in market_columns if col in df_reco.columns]].copy() if not df_reco.empty else df_sales_for_view

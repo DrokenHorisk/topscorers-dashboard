@@ -3,10 +3,12 @@ import os
 import asyncio
 import signal
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse, PlainTextResponse
 from starlette.concurrency import run_in_threadpool
 from .dashboard_runner import generate_dashboard, OUTPUT_PATH
 from .live_service import get_live_snapshot
+from .bid_service import list_bids, save_bid, update_result
 
 app = FastAPI(title="TopScorers Backend")
 
@@ -28,6 +30,42 @@ def api_generate():
 async def api_live():
     # Les appels TopScorers sont bloquants : ils tournent hors de la boucle FastAPI.
     return await run_in_threadpool(get_live_snapshot)
+
+
+class BidCreate(BaseModel):
+    player_name: str
+    player_id: int | None = None
+    team: str = ""
+    position_family: str = ""
+    market_price: float = Field(gt=0)
+    bid_amount: float = Field(gt=0)
+    result: str = "pending"
+    final_price: float | None = None
+    notes: str = ""
+
+
+class BidResult(BaseModel):
+    result: str
+    final_price: float | None = None
+    notes: str | None = None
+
+
+@app.get("/api/bids")
+def api_bids():
+    return {"ok": True, "items": list_bids()}
+
+
+@app.post("/api/bids")
+def api_create_bid(bid: BidCreate):
+    return {"ok": True, "item": save_bid(bid.model_dump())}
+
+
+@app.patch("/api/bids/{bid_id}")
+def api_update_bid(bid_id: str, result: BidResult):
+    item = update_result(bid_id, result.result, result.final_price, result.notes)
+    if item is None:
+        raise HTTPException(404, "Enchère introuvable")
+    return {"ok": True, "item": item}
 
 @app.get("/api/dashboard")
 def api_dashboard():
