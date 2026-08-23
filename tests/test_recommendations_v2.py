@@ -55,7 +55,8 @@ class RecommendationV2Tests(unittest.TestCase):
         self.assertEqual(centre["Remplace"], "Ailier faible")
         self.assertGreater(centre["Gain pts/match"], 3.0)
         self.assertGreater(centre["Valeur estimée"], centre["Prix"])
-        self.assertLessEqual(centre["Enchère max"], centre["Valeur estimée"])
+        self.assertGreaterEqual(centre["Enchère max"], centre["Offre conseillée"])
+        self.assertIn("Surprime vs valeur (%)", result.columns)
 
     def test_optimizer_respects_budget_and_unique_replacements(self):
         result = dashboard.compute_recommendations_v2(self.market, self.roster)
