@@ -148,14 +148,15 @@ def build_html_page(sections, must_buy_threshold: float):
   .nav-tabs .nav-link.active {{ color:#fff; background:var(--lhc-red); border-color:var(--lhc-red); }}
 
   .card {{ background:var(--lhc-card); border:1px solid var(--row-border); border-radius:14px; }}
-  .table {{ color:var(--lhc-text); border-color:var(--row-border); }}
-  table.table-sm td, table.table-sm th {{ padding:.42rem .6rem; vertical-align: middle; }}
+  .table {{ color:var(--lhc-text); border-color:var(--row-border); font-size:.9rem; line-height:1.2; }}
+  table.table-sm td, table.table-sm th {{ padding:.3rem .48rem; vertical-align:middle; }}
   .table-wrapper {{ overflow-x:auto; }}
 
-  .table td, .table th {{ color: var(--lhc-text) !important; }}
-  .table th {{ font-weight: 600; color: var(--lhc-muted) !important; }}
+  .table td, .table th {{ color:var(--lhc-text) !important; white-space:nowrap; }}
+  .table th {{ font-weight:600; color:var(--lhc-muted) !important; }}
+  .table td.cell-longtext {{ white-space:normal; min-width:220px; max-width:360px; line-height:1.3; }}
 
-  table a.pm-open {{ color: var(--lhc-text); text-decoration: none; font-weight: 500; }}
+  table a.pm-open {{ color:var(--lhc-text); text-decoration:none; font-weight:500; white-space:nowrap; }}
   table a.pm-open:hover {{ color: var(--lhc-red); text-decoration: underline; }}
 
   .table tbody tr.decision-buy td      {{ background:rgba(25,195,125,.16) !important; }}
@@ -690,8 +691,22 @@ document.addEventListener('DOMContentLoaded', function () {{
     }});
   }}
 
+  function markReadableColumns(table) {{
+    if (!table || !table.tHead || !table.tHead.rows.length) return;
+    var longNames = ['pourquoi', 'analyse', 'recommandation', 'notes'];
+    var rows = table._allRowsMaster || [];
+    Array.prototype.forEach.call(table.tHead.rows[0].cells, function(th, idx) {{
+      var name = (th.innerText || '').trim().toLowerCase();
+      if (!longNames.some(function(label) {{ return name.indexOf(label) >= 0; }})) return;
+      rows.forEach(function(row) {{
+        if (row.cells[idx]) row.cells[idx].classList.add('cell-longtext');
+      }});
+    }});
+  }}
+
   document.querySelectorAll('table').forEach(function (tbl) {{
     captureAllRows(tbl);
+    markReadableColumns(tbl);
     enableTableSortV2(tbl);
     enablePagerV2(tbl, 25);
     enableColumnToggles(tbl);
