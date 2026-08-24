@@ -9,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 from .dashboard_runner import generate_dashboard, OUTPUT_PATH
 from .live_service import get_live_snapshot
 from .bid_service import list_bids, save_bid, update_result
+from .auction_monitor import sync_market_bids
 
 app = FastAPI(title="TopScorers Backend")
 
@@ -21,6 +22,7 @@ def healthz():
 @app.post("/api/generate")
 def api_generate():
     try:
+        sync_market_bids()
         path = generate_dashboard()
         return {"ok": True, "file": path}
     except Exception as e:
@@ -67,6 +69,14 @@ def api_update_bid(bid_id: str, result: BidResult):
         raise HTTPException(404, "Enchère introuvable")
     return {"ok": True, "item": item}
 
+
+@app.post("/api/bids/sync")
+async def api_sync_bids():
+    try:
+        return await run_in_threadpool(sync_market_bids)
+    except Exception as exc:
+        raise HTTPException(502, f"Synchronisation des enchères impossible: {exc}")
+
 @app.get("/api/dashboard")
 def api_dashboard():
     if OUTPUT_PATH.exists():
@@ -79,7 +89,22 @@ def health():
 
 # --------- Scheduler interne ----------
 _bg_task = None
+_bid_task = None
 _stop = asyncio.Event()
+
+
+async def _periodic_bid_sync():
+    interval_s = max(300, int(os.getenv("BID_SYNC_INTERVAL_SECONDS", "300")))
+    while not _stop.is_set():
+        try:
+            result = await run_in_threadpool(sync_market_bids)
+            print(f"[bids] Sync OK: {result['imported']} importée(s), {result['resolved']} résolue(s)")
+        except Exception as exc:
+            print(f"[bids] Sync FAILED: {exc}")
+        try:
+            await asyncio.wait_for(_stop.wait(), timeout=interval_s)
+        except asyncio.TimeoutError:
+            pass
 
 async def _periodic_generator():
     interval_h = float(os.getenv("AUTO_GENERATE_INTERVAL_HOURS", "3"))
@@ -89,6 +114,7 @@ async def _periodic_generator():
     # génération au démarrage si demandé
     if on_start:
         try:
+            await run_in_threadpool(sync_market_bids)
             p = generate_dashboard()
             print(f"[scheduler] First generation OK -> {p}")
         except Exception as e:
@@ -103,6 +129,7 @@ async def _periodic_generator():
             except asyncio.TimeoutError:
                 pass
 
+            await run_in_threadpool(sync_market_bids)
             p = generate_dashboard()
             print(f"[scheduler] Periodic generation OK -> {p}")
         except Exception as e:
@@ -110,8 +137,9 @@ async def _periodic_generator():
 
 @app.on_event("startup")
 async def _on_startup():
-    global _bg_task
+    global _bg_task, _bid_task
     _bg_task = asyncio.create_task(_periodic_generator())
+    _bid_task = asyncio.create_task(_periodic_bid_sync())
 
     # gestion arrêt gracieux si uvicorn passe les signaux
     loop = asyncio.get_running_loop()
@@ -128,5 +156,10 @@ async def _on_shutdown():
     if _bg_task:
         try:
             await asyncio.wait_for(_bg_task, timeout=10)
+        except asyncio.TimeoutError:
+            pass
+    if _bid_task:
+        try:
+            await asyncio.wait_for(_bid_task, timeout=10)
         except asyncio.TimeoutError:
             pass
