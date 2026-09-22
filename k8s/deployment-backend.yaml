@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: ghcr.io/drokenhorisk/topscorers-backend:a73ab0f73fac55782a3eb5561e5ac7bcb9286d72
+          image: ghcr.io/drokenhorisk/topscorers-backend:5bcbab395d26711702634eadf9683a41b932e433
           imagePullPolicy: Always
           envFrom:
             - configMapRef: { name: topscorers-config }
