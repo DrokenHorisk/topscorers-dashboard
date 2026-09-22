@@ -309,6 +309,10 @@ def _fetch_uncached():
 
     return {
         "ok": True,
+        # Exposed on purpose so deployments can be verified without relying on
+        # a container image tag or verbose upstream payload logs.
+        "source": "topscorers:/api/live",
+        "live_parser_version": 2,
         "status": status,
         "message": message,
         "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -320,6 +324,11 @@ def _fetch_uncached():
         "games": games,
         "member_required": member_required,
         "cache_seconds": _CACHE_TTL,
+        "upstream_next_update_seconds": _as_number(
+            _direct_pick(live_data, ("next_update_in_seconds",))
+        ),
+        "past_live_date": _direct_pick(live_data, ("past_live_date",)),
+        "next_live_date": _direct_pick(live_data, ("next_live_date",)),
         "official_scoring": OFFICIAL_SCORING,
     }
 
