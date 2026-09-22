@@ -4,6 +4,46 @@ from backend.app import live_service
 
 
 class LiveServiceTests(unittest.TestCase):
+    def test_normalizes_real_live_endpoint_game_shape(self):
+        payload = {
+            "games": [{
+                "home_team": {"acronym": "LHC"},
+                "away_team": {"acronym": "SCB"},
+                "begin": "2026-09-22T19:45:00+02:00",
+                "score": "2:1",
+                "status": 2,
+                "status_key": "live",
+                "status_name": "2e tiers",
+                "is_live": True,
+            }]
+        }
+        games = live_service._normalize_games(payload)
+        self.assertEqual(len(games), 1)
+        self.assertEqual(games[0]["home_score"], "2")
+        self.assertEqual(games[0]["away_score"], "1")
+        self.assertEqual(games[0]["status"], "2e tiers")
+        self.assertTrue(games[0]["live"])
+
+    def test_normalizes_games_data_list_fallback(self):
+        payload = {"data": [{"home": "LHC", "away": "SCB", "score": "0-0"}]}
+        games = live_service._normalize_games(payload)
+        self.assertEqual(games[0]["home_score"], "0")
+        self.assertEqual(games[0]["away_score"], "0")
+
+    def test_reads_badges_from_live_player(self):
+        player = {
+            "id": 42,
+            "firstname": "Test",
+            "lastname": "Player",
+            "position_id": 3,
+            "points": 65,
+            "badges": {"goals": 1, "shots_on_goal": 1},
+        }
+        row = live_service._player_row(player, {"42"}, stats_source=True)
+        self.assertEqual(row["live_points"], 65)
+        self.assertEqual(row["stats"]["goals"], 1)
+        self.assertEqual(row["stats"]["shots_on_goal"], 1)
+
     def test_normalizes_live_player_events(self):
         player = {
             "id": 42,
