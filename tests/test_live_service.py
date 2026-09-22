@@ -94,6 +94,16 @@ class LiveServiceTests(unittest.TestCase):
         }
         self.assertEqual(live_service._active_player_ids(payload), {"12", "34"})
 
+    def test_direct_pick_does_not_leak_nested_live_metadata(self):
+        payload = {
+            "next_update_in_seconds": 15,
+            "socket": {"next_update_in_seconds": 999},
+        }
+        self.assertEqual(
+            live_service._direct_pick(payload, ("next_update_in_seconds",)),
+            15,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
