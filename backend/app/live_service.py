@@ -132,7 +132,7 @@ def _player_row(player, active_ids, stats_source=False):
     team = _direct_pick(merged, ("team",), {})
     if isinstance(team, dict):
         team = team.get("acronym") or team.get("name")
-    live_stats = _pick(merged, ("live_stats", "statistics", "stats"), {})
+    live_stats = _pick(merged, ("live_stats", "statistics", "stats", "badges"), {})
     if not isinstance(live_stats, dict):
         live_stats = {}
 
@@ -167,7 +167,8 @@ def _player_row(player, active_ids, stats_source=False):
 
 
 def _normalize_games(payload):
-    games = _as_list(_data(payload), ("games", "matches", "fixtures"))
+    data = _data(payload)
+    games = data if isinstance(data, list) else _as_list(data, ("games", "matches", "fixtures"))
     out = []
     for game in games:
         if not isinstance(game, dict):
@@ -178,13 +179,22 @@ def _normalize_games(payload):
             home = home.get("acronym") or home.get("name")
         if isinstance(away, dict):
             away = away.get("acronym") or away.get("name")
+        score = _pick(game, ("score",))
+        home_score = _pick(game, ("home_score", "score_home"))
+        away_score = _pick(game, ("away_score", "score_away"))
+        if (home_score is None or away_score is None) and isinstance(score, str):
+            normalized_score = score.replace("–", "-").replace("—", "-").replace(":", "-")
+            parts = [part.strip() for part in normalized_score.split("-", 1)]
+            if len(parts) == 2:
+                home_score = home_score if home_score is not None else parts[0]
+                away_score = away_score if away_score is not None else parts[1]
         out.append({
             "home": home,
             "away": away,
-            "home_score": _pick(game, ("home_score", "score_home")),
-            "away_score": _pick(game, ("away_score", "score_away")),
-            "status": _pick(game, ("status", "state", "game_status")),
-            "starts_at": _pick(game, ("starts_at", "start_time", "date")),
+            "home_score": home_score,
+            "away_score": away_score,
+            "status": _pick(game, ("status_name", "status_abbr", "status_key", "status", "state", "game_status")),
+            "starts_at": _pick(game, ("begin", "starts_at", "start_time", "date")),
             "live": bool(_pick(game, ("is_live", "live"), False)),
         })
     return out
@@ -197,18 +207,22 @@ def _fetch_uncached():
         team_payload = _request_json(session, f"/api/user/teams/{dashboard.TEAM_ID}")
         roster_payload = _request_json(session, f"/api/user/teams/{dashboard.TEAM_ID}/players")
         stats_payload = _request_json(session, f"/api/user/teams/{dashboard.TEAM_ID}/stats")
+        live_payload = _request_json(session, "/api/live")
     except PermissionError:
         _session = None
         session = _get_session()
         team_payload = _request_json(session, f"/api/user/teams/{dashboard.TEAM_ID}")
         roster_payload = _request_json(session, f"/api/user/teams/{dashboard.TEAM_ID}/players")
         stats_payload = _request_json(session, f"/api/user/teams/{dashboard.TEAM_ID}/stats")
+        live_payload = _request_json(session, "/api/live")
 
     team_data = _data(team_payload) if team_payload else {}
     stats_data = _data(stats_payload) if stats_payload else {}
+    live_data = _data(live_payload) if live_payload else {}
     active_ids = _active_player_ids(team_data)
 
-    stats_players = _as_list(stats_data, ("players", "lineup", "live_players", "player_stats"))
+    live_players = _as_list(live_data, ("players", "lineup", "live_players", "player_stats"))
+    stats_players = live_players or _as_list(stats_data, ("players", "lineup", "live_players", "player_stats"))
     roster_data = _data(roster_payload) if roster_payload else []
     roster_players = roster_data if isinstance(roster_data, list) else _as_list(roster_data, ("players",))
     team_players = _as_list(team_data, ("players",))
@@ -222,17 +236,36 @@ def _fetch_uncached():
 
     roster_by_id = {str(player_id(p)): p for p in roster_players if player_id(p) is not None}
     if stats_players:
-        source = []
-        for live_player in stats_players:
-            base_player = roster_by_id.get(str(player_id(live_player)), {})
-            source.append({**base_player, **live_player})
+        live_by_id = {
+            str(player_id(player)): player
+            for player in stats_players
+            if player_id(player) is not None
+        }
+        if roster_by_id:
+            source = [
+                {
+                    **roster_player,
+                    **live_by_id.get(pid, {}),
+                    "_live_payload": pid in live_by_id,
+                }
+                for pid, roster_player in roster_by_id.items()
+            ]
+        else:
+            source = [{**player, "_live_payload": True} for player in stats_players]
     else:
         source = roster_players
-    players = [row for row in (_player_row(p, active_ids, bool(stats_players)) for p in source) if row]
+    players = [
+        row for row in (
+            _player_row(player, active_ids, bool(player.get("_live_payload")))
+            for player in source
+        ) if row
+    ]
     players.sort(key=lambda p: (not p["lined_up"], -(p["live_points"] or 0), p["name"]))
 
-    games_payload = None
-    for path in ("/api/games", "/api/games/live"):
+    games_payload = live_payload
+    for path in ("/api/games",):
+        if _normalize_games(games_payload):
+            break
         try:
             candidate = _request_json(session, path)
         except PermissionError:
@@ -242,7 +275,16 @@ def _fetch_uncached():
             break
     games = _normalize_games(games_payload)
 
-    total = _as_number(_pick(stats_data, (
+    live_teams = {
+        str(team)
+        for game in games if game["live"]
+        for team in (game["home"], game["away"])
+        if team is not None
+    }
+    for player in players:
+        player["playing"] = player["playing"] or str(player.get("team")) in live_teams
+
+    total = _as_number(_pick(live_data, (
         "live_points", "points_live", "points_today", "gameday_points",
         "game_day_points", "round_points", "total_points",
     )))
@@ -251,9 +293,9 @@ def _fetch_uncached():
         total = sum(known_points)
 
     member_required = bool(
-        isinstance(stats_payload, dict) and stats_payload.get("member_required")
-    ) or bool(_pick(stats_data, ("member_required", "upgrade_required"), False))
-    is_live = bool(_pick(stats_data, ("is_live", "live", "gameday_live"), False))
+        isinstance(live_payload, dict) and live_payload.get("member_required")
+    ) or bool(_pick(live_data, ("member_required", "upgrade_required"), False))
+    is_live = bool(_pick(live_data, ("is_live", "live", "gameday_live"), False))
     is_live = is_live or any(g["live"] for g in games) or any(p["playing"] for p in players)
 
     if member_required:
@@ -273,7 +315,7 @@ def _fetch_uncached():
         "team": "Droken",
         "team_id": dashboard.TEAM_ID,
         "live_points": total,
-        "rank": _pick(stats_data, ("live_rank", "rank", "position")),
+        "rank": _pick(live_data, ("live_rank", "rank", "position")),
         "players": players,
         "games": games,
         "member_required": member_required,
